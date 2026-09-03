@@ -20,9 +20,12 @@ install -m 0755 "$1" /usr/local/bin/monitor-server
 install -d -m 0700 -o monitor -g monitor /var/lib/monitor
 install -m 0644 "$(dirname "$0")/monitor-server.service" /etc/systemd/system/monitor-server.service
 
-echo "正在初始化本机管理员密钥…"
-runuser -u monitor -- /usr/local/bin/monitor-server admin reset --db /var/lib/monitor/monitor.db
+if [ ! -f /var/lib/monitor/monitor.db ]; then
+    echo "正在初始化本机管理员密钥…"
+    runuser -u monitor -- /usr/local/bin/monitor-server admin reset --db /var/lib/monitor/monitor.db
+else
+    echo "已有数据库未改动，管理员密钥保持不变。"
+fi
 systemctl daemon-reload
 systemctl enable --now monitor-server
 echo "主控已启动：127.0.0.1:34331"
-

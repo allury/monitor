@@ -481,7 +481,9 @@ mod linux {
             .all(|target| {
                 !target.is_empty()
                     && target.len() <= 255
-                    && !target.chars().any(char::is_whitespace)
+                    && !target
+                        .chars()
+                        .any(|character| character.is_whitespace() || "/?#".contains(character))
                     && target.rsplit_once(':').is_some_and(|(host, port)| {
                         !host.is_empty() && port.parse::<u16>().is_ok_and(|value| value > 0)
                     })

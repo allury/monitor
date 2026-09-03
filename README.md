@@ -69,6 +69,12 @@ monitor.example.com {
 }
 ```
 
+也可以用完全独立的主控安装脚本（不会安装探针）：
+
+```bash
+sudo sh deploy/install-server.sh ./monitor-server-linux-amd64
+```
+
 ### 2. 探针
 
 先前生成的完整密钥已经包含节点 ID。临时运行：
@@ -92,6 +98,14 @@ sudo systemctl enable --now monitor-agent
 ```
 
 编辑单元中的 `--server` 地址后再启动。Agent 通过 systemd credential 读取密钥，密钥不会出现在命令行或普通环境变量中。
+
+或使用独立的探针安装脚本（不会安装主控）：
+
+```bash
+sudo sh deploy/install-agent.sh ./monitor-agent-linux-amd64 https://monitor.example.com
+```
+
+脚本会在终端隐藏输入节点密钥。两个脚本都不包含更新逻辑。
 
 ## 命令
 

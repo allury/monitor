@@ -14,15 +14,17 @@ if [ ! -f "$(dirname "$0")/monitor-agent.service" ]; then
     exit 1
 fi
 
-case "$2" in
-    https://*) ;;
-    *) echo "上报地址必须是 HTTPS 反向代理域名。" >&2; exit 1 ;;
-esac
+if ! printf '%s\n' "$2" | grep -Eq '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$'; then
+    echo "上报地址必须是纯 HTTPS 反向代理域名，例如 https://monitor.example.com。" >&2
+    exit 1
+fi
 
 printf '请粘贴后台创建节点时显示的密钥: '
+trap 'stty echo 2>/dev/null || true' EXIT INT TERM
 stty -echo
 IFS= read -r token
 stty echo
+trap - EXIT INT TERM
 printf '\n'
 if [ -z "$token" ]; then
     echo "密钥不能为空。" >&2
@@ -30,8 +32,8 @@ if [ -z "$token" ]; then
 fi
 
 install -m 0755 "$1" /usr/local/bin/monitor-agent
+umask 077
 printf '%s\n' "$token" > /etc/monitor-agent.token
-chmod 0600 /etc/monitor-agent.token
 unset token
 install -m 0644 "$(dirname "$0")/monitor-agent.service" /etc/systemd/system/monitor-agent.service
 install -d -m 0755 /etc/systemd/system/monitor-agent.service.d
@@ -43,4 +45,3 @@ EOF
 systemctl daemon-reload
 systemctl enable --now monitor-agent
 echo "探针已启动，上报到 $2"
-

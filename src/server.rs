@@ -190,28 +190,18 @@ async fn process_reports(
             continue;
         };
         let report = incoming.report;
-        let first_report = node.boot_id.is_empty();
-        let same_boot = !first_report && node.boot_id == report.boot_id;
-        let delta_rx = if first_report {
-            0
-        } else if same_boot {
-            report
-                .metrics
-                .net_rx_total
-                .saturating_sub(node.last_rx_counter)
-        } else {
-            report.metrics.net_rx_total
-        };
-        let delta_tx = if first_report {
-            0
-        } else if same_boot {
-            report
-                .metrics
-                .net_tx_total
-                .saturating_sub(node.last_tx_counter)
-        } else {
-            report.metrics.net_tx_total
-        };
+        let delta_rx = traffic_delta(
+            &node.boot_id,
+            node.last_rx_counter,
+            &report.boot_id,
+            report.metrics.net_rx_total,
+        );
+        let delta_tx = traffic_delta(
+            &node.boot_id,
+            node.last_tx_counter,
+            &report.boot_id,
+            report.metrics.net_tx_total,
+        );
 
         if node.month_key != month_key {
             node.month_key = month_key;
@@ -262,6 +252,16 @@ async fn process_reports(
             Err(TrySendError::Full(_)) => warn!("数据库队列已满，本次快照仅保留在内存中"),
             Err(TrySendError::Disconnected(_)) => error!("数据库线程已经停止"),
         }
+    }
+}
+
+fn traffic_delta(previous_boot: &str, previous: u64, boot: &str, current: u64) -> u64 {
+    if previous_boot.is_empty() {
+        0
+    } else if previous_boot == boot {
+        current.saturating_sub(previous)
+    } else {
+        current
     }
 }
 
@@ -842,5 +842,13 @@ mod tests {
         assert!(valid_report(&value));
         value.metrics.cpu = 101.0;
         assert!(!valid_report(&value));
+    }
+
+    #[test]
+    fn traffic_uses_a_baseline_and_survives_reboots() {
+        assert_eq!(traffic_delta("", 0, "boot-a", 50_000), 0);
+        assert_eq!(traffic_delta("boot-a", 50_000, "boot-a", 51_250), 1_250);
+        assert_eq!(traffic_delta("boot-a", 51_250, "boot-b", 400), 400);
+        assert_eq!(traffic_delta("boot-b", 400, "boot-b", 100), 0);
     }
 }

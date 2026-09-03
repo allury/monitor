@@ -20,6 +20,8 @@ jobs:
           rustup default stable
       - name: Formatting
         run: cargo fmt --all --check
+      - name: Shell scripts
+        run: shellcheck deploy/*.sh
       - name: Static checks
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Tests

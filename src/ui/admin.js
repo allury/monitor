@@ -65,9 +65,9 @@ function renderState(state) {
   currentState = state;
   renderNodes(state.nodes || []);
   const latency = state.settings.latency;
-  document.querySelector("#telecom").value = latency.telecom;
-  document.querySelector("#unicom").value = latency.unicom;
-  document.querySelector("#mobile").value = latency.mobile;
+  document.querySelector("#latency-telecom").value = latency.telecom;
+  document.querySelector("#latency-unicom").value = latency.unicom;
+  document.querySelector("#latency-mobile").value = latency.mobile;
   const site = state.settings.site;
   document.querySelector("#site-name").value = site.name;
   document.querySelector("#site-description").value = site.description;
@@ -159,9 +159,9 @@ document.querySelector("#latency-form").addEventListener("submit", async event =
     await api("/latency", {
       method: "PUT",
       body: JSON.stringify({
-        telecom: document.querySelector("#telecom").value.trim(),
-        unicom: document.querySelector("#unicom").value.trim(),
-        mobile: document.querySelector("#mobile").value.trim(),
+        telecom: document.querySelector("#latency-telecom").value.trim(),
+        unicom: document.querySelector("#latency-unicom").value.trim(),
+        mobile: document.querySelector("#latency-mobile").value.trim(),
       }),
     });
     status.textContent = "已保存并下发";
@@ -188,4 +188,3 @@ document.querySelector("#site-form").addEventListener("submit", async event => {
 });
 
 if (session) loadState(); else showLogin();
-

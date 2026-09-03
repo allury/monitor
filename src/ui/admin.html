@@ -65,9 +65,9 @@
       <section class="panel" id="latency-panel">
         <form class="panel-card settings-form" id="latency-form">
           <div class="panel-head"><div><h2>三网延迟地址</h2><p>保存后立即下发到在线探针，只允许 TCP host:port。</p></div></div>
-          <div class="field"><label for="telecom">电信</label><input class="input" id="telecom" placeholder="ha-ct-v4.ip.zstaticcdn.com:80" required /></div>
-          <div class="field"><label for="unicom">联通</label><input class="input" id="unicom" placeholder="ha-cu-v4.ip.zstaticcdn.com:80" required /></div>
-          <div class="field"><label for="mobile">移动</label><input class="input" id="mobile" placeholder="ha-cm-v4.ip.zstaticcdn.com:80" required /></div>
+          <div class="field"><label for="latency-telecom">电信</label><input class="input" id="latency-telecom" placeholder="ha-ct-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>
+          <div class="field"><label for="latency-unicom">联通</label><input class="input" id="latency-unicom" placeholder="ha-cu-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>
+          <div class="field"><label for="latency-mobile">移动</label><input class="input" id="latency-mobile" placeholder="ha-cm-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>
           <div class="form-actions"><button class="button" type="submit">保存</button><span class="save-status" id="latency-status"></span></div>
         </form>
       </section>
@@ -87,4 +87,3 @@
     <script src="/assets/admin.js" defer></script>
   </body>
 </html>
-

@@ -77,7 +77,10 @@ pub async fn run(options: ServerOptions) -> Result<()> {
     ));
     let settings = Arc::new(RwLock::new(loaded_settings));
     let initial_site = settings.read().await.site.clone();
-    let initial = render_snapshot(&nodes.read().await, &initial_site)?;
+    let initial = {
+        let guard = nodes.read().await;
+        render_snapshot(&guard, &initial_site)?
+    };
     let snapshot = Arc::new(RwLock::new(initial));
     let (broadcast, _) = broadcast::channel::<Arc<str>>(16);
     let (agent_config, _) = broadcast::channel::<LatencyTargets>(8);
@@ -273,7 +276,10 @@ async fn refresh_snapshots(
     loop {
         ticker.tick().await;
         let site = settings.read().await.site.clone();
-        let rendered = render_snapshot(&nodes.read().await, &site);
+        let rendered = {
+            let guard = nodes.read().await;
+            render_snapshot(&guard, &site)
+        };
         match rendered {
             Ok(rendered) => {
                 *snapshot.write().await = rendered.clone();

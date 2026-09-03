@@ -1,0 +1,36 @@
+[Unit]
+Description=Monitor server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=monitor
+Group=monitor
+WorkingDirectory=/var/lib/monitor
+ExecStart=/usr/local/bin/monitor-server --listen 127.0.0.1:34331 --db /var/lib/monitor/monitor.db
+Restart=on-failure
+RestartSec=3s
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/monitor
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Monitor 管理" />
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/assets/app.css" />
+    <title>管理 · Monitor</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="/">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 13h4l2-7 4 13 2-6h6" /></svg></span>
+          <span>Monitor</span>
+        </a>
+        <div class="header-actions">
+          <a class="admin-link" href="/">状态页</a>
+          <button class="button secondary small hidden" id="logout" type="button">退出</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="auth-page" id="login-view">
+      <form class="auth-card" id="login-form">
+        <h1>进入后台</h1>
+        <p>使用主控首次启动时显示的管理员密钥。</p>
+        <div class="field">
+          <label for="password">管理员密钥</label>
+          <input class="input" id="password" name="password" type="password" autocomplete="current-password" required />
+        </div>
+        <button class="button full" type="submit">登录</button>
+        <div class="form-error" id="login-error" role="alert"></div>
+      </form>
+    </main>
+
+    <main class="shell admin-shell hidden" id="admin-view">
+      <div class="admin-top">
+        <div><h1>管理</h1><p>只保留节点、延迟地址与站点文字。</p></div>
+      </div>
+      <nav class="tabs" aria-label="后台栏目">
+        <button class="tab active" type="button" data-panel="nodes-panel">节点</button>
+        <button class="tab" type="button" data-panel="latency-panel">延迟检测</button>
+        <button class="tab" type="button" data-panel="site-panel">站点设置</button>
+      </nav>
+
+      <section class="panel active" id="nodes-panel">
+        <div class="two-column">
+          <div class="panel-card">
+            <div class="panel-head"><div><h2>节点</h2><p>停用后旧数据保留，但密钥立即失效。</p></div></div>
+            <div id="node-list"></div>
+          </div>
+          <form class="panel-card" id="node-form">
+            <div class="panel-head"><div><h2>添加节点</h2><p>每个节点使用独立密钥。</p></div></div>
+            <div class="field"><label for="node-id">节点 ID</label><input class="input" id="node-id" placeholder="hk-1" maxlength="64" required /></div>
+            <div class="field"><label for="node-name">显示名称</label><input class="input" id="node-name" placeholder="香港" maxlength="80" required /></div>
+            <button class="button full" type="submit">创建节点</button>
+            <div class="token-box" id="token-box"><p>密钥只显示这一次，请立即保存到对应 VPS。</p><div class="token-line"><code id="node-token"></code><button class="button secondary small" id="copy-token" type="button">复制</button></div></div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel" id="latency-panel">
+        <form class="panel-card settings-form" id="latency-form">
+          <div class="panel-head"><div><h2>三网延迟地址</h2><p>保存后立即下发到在线探针，只允许 TCP host:port。</p></div></div>
+          <div class="field"><label for="telecom">电信</label><input class="input" id="telecom" placeholder="ha-ct-v4.ip.zstaticcdn.com:80" required /></div>
+          <div class="field"><label for="unicom">联通</label><input class="input" id="unicom" placeholder="ha-cu-v4.ip.zstaticcdn.com:80" required /></div>
+          <div class="field"><label for="mobile">移动</label><input class="input" id="mobile" placeholder="ha-cm-v4.ip.zstaticcdn.com:80" required /></div>
+          <div class="form-actions"><button class="button" type="submit">保存</button><span class="save-status" id="latency-status"></span></div>
+        </form>
+      </section>
+
+      <section class="panel" id="site-panel">
+        <form class="panel-card settings-form" id="site-form">
+          <div class="panel-head"><div><h2>站点设置</h2><p>只修改文字，视觉风格保持固定。</p></div></div>
+          <div class="field"><label for="site-name">站点名称</label><input class="input" id="site-name" maxlength="40" required /></div>
+          <div class="field"><label for="site-description">状态页说明</label><input class="input" id="site-description" maxlength="120" /></div>
+          <div class="field"><label for="site-footer">页脚文字</label><input class="input" id="site-footer" maxlength="120" /></div>
+          <div class="form-actions"><button class="button" type="submit">保存</button><span class="save-status" id="site-status"></span></div>
+        </form>
+      </section>
+    </main>
+
+    <div class="toast hidden" id="toast" role="status"></div>
+    <script src="/assets/admin.js" defer></script>
+  </body>
+</html>
+

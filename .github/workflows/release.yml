@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            binary: monitor-server
+            feature: server
+            artifact: monitor-server-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            binary: monitor-server
+            feature: server
+            artifact: monitor-server-linux-arm64
+          - target: x86_64-unknown-linux-musl
+            binary: monitor-agent
+            feature: agent
+            artifact: monitor-agent-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            binary: monitor-agent
+            feature: agent
+            artifact: monitor-agent-linux-arm64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build static binary
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: "--locked --release --bin ${{ matrix.binary }} --features ${{ matrix.feature }}"
+          strip: true
+      - name: Stage artifact
+        run: |
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "${{ matrix.artifact }}"
+          sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --generate-notes --verify-tag

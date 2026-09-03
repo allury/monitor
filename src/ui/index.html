@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="克制、只读的服务器状态页" />
+    <link rel="icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/assets/app.css" />
+    <title>Monitor</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="/" aria-label="Monitor 首页">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M3 13h4l2-7 4 13 2-6h6" /></svg>
+          </span>
+          <span>Monitor</span>
+        </a>
+        <div class="header-actions">
+          <span class="connection" id="connection"><i></i><span>连接中</span></span>
+          <a class="admin-link" href="/admin">管理</a>
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="切换主题">
+            <svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/></svg>
+            <svg class="moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="overview" aria-label="总览">
+        <article class="summary-card">
+          <div class="summary-label"><span>节点</span><span id="offline-label">—</span></div>
+          <div class="summary-value"><strong id="node-count">—</strong><span>台在线</span></div>
+        </article>
+        <article class="summary-card">
+          <div class="summary-label"><span>实时网速</span><span>全节点</span></div>
+          <div class="summary-value compact" id="live-speed">—</div>
+        </article>
+        <article class="summary-card">
+          <div class="summary-label"><span>今日流量</span><span>下行 + 上行</span></div>
+          <div class="summary-value"><strong id="today-traffic">—</strong></div>
+        </article>
+        <article class="summary-card">
+          <div class="summary-label"><span>累计流量</span><span>重启不归零</span></div>
+          <div class="summary-value"><strong id="total-traffic">—</strong></div>
+        </article>
+      </section>
+
+      <section class="section-heading">
+        <div>
+          <h1>服务器</h1>
+          <p id="updated-at">等待首次数据</p>
+        </div>
+      </section>
+
+      <div class="node-grid" id="nodes" aria-live="polite">
+        <article class="empty-card">
+          <div class="empty-icon" aria-hidden="true">⌁</div>
+          <h2>正在连接</h2>
+          <p>状态页会在收到快照后自动更新。</p>
+        </article>
+      </div>
+    </main>
+
+    <footer class="shell footer">只读状态页 · 数据每 2 秒刷新</footer>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

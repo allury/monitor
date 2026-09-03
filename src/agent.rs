@@ -401,7 +401,7 @@ mod linux {
             return Err(std::io::Error::last_os_error()).context("无法读取磁盘统计");
         }
         let stats = unsafe { stats.assume_init() };
-        let block_size = stats.f_frsize as u64;
+        let block_size = stats.f_frsize;
         let total = stats.f_blocks.saturating_mul(block_size);
         let available = stats.f_bavail.saturating_mul(block_size);
         Ok((total, total.saturating_sub(available)))

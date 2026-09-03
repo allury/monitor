@@ -515,6 +515,10 @@ mod linux {
                 websocket_endpoint("https://monitor.example.com/"),
                 "wss://monitor.example.com/api/agent"
             );
+            assert_eq!(
+                websocket_endpoint("http://192.0.2.10:34331"),
+                "ws://192.0.2.10:34331/api/agent"
+            );
         }
     }
 }

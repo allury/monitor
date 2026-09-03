@@ -15,6 +15,15 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+function agentInstallCommand(token) {
+  const installer = "https://github.com/allury/monitor/releases/latest/download/install-agent.sh";
+  return `curl -fsSL ${installer} | sudo sh -s -- --server ${shellQuote(window.location.origin)} --token ${shellQuote(token)}`;
+}
+
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
   if (session) headers.authorization = `Bearer ${session}`;
@@ -124,7 +133,7 @@ document.querySelector("#node-form").addEventListener("submit", async event => {
         name: document.querySelector("#node-name").value.trim(),
       }),
     });
-    document.querySelector("#node-token").textContent = result.token;
+    document.querySelector("#node-install-command").textContent = agentInstallCommand(result.token);
     document.querySelector("#token-box").classList.add("show");
     document.querySelector("#node-id").value = "";
     document.querySelector("#node-name").value = "";
@@ -133,9 +142,9 @@ document.querySelector("#node-form").addEventListener("submit", async event => {
   } catch (error) { toast(error.message); }
 });
 
-document.querySelector("#copy-token").addEventListener("click", async () => {
-  const value = document.querySelector("#node-token").textContent;
-  try { await navigator.clipboard.writeText(value); toast("密钥已复制"); }
+document.querySelector("#copy-install-command").addEventListener("click", async () => {
+  const value = document.querySelector("#node-install-command").textContent;
+  try { await navigator.clipboard.writeText(value); toast("安装命令已复制"); }
   catch { toast("复制失败，请手动选择密钥"); }
 });
 

@@ -2,110 +2,116 @@
 
 一个刻意保持很小的 Linux 服务器监控。主控与只读探针是两个独立的 Rust 二进制：主控内嵌状态页并持有 SQLite，探针只负责采集和上报。没有前端运行时、配置目录或插件。
 
+## 安装
+
+先执行 `uname -m` 确认架构：
+
+| 输出 | 下载文件后缀 |
+| --- | --- |
+| `x86_64` | `linux-amd64` |
+| `aarch64`、`arm64` | `linux-arm64` |
+
+所有文件都在 [Releases](https://github.com/allury/monitor/releases/latest)。以下命令适用于公开仓库；仓库保持私有时，未认证的 `curl`/`wget` 会收到 404，需要先在浏览器登录 GitHub 后下载再上传。
+
+### 主控
+
+使用 `curl` 一键安装：
+
+```bash
+curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-server.sh | sudo sh
+```
+
+暂时没有反代、需要直接用 `http://服务器IP:34331` 测试时，显式开启公网监听：
+
+```bash
+curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-server.sh | sudo sh -s -- --public
+```
+
+HTTP 会明文传输节点密钥和监控数据，只适合临时测试。配置好 HTTPS 后，重新执行不带 `--public` 的安装命令即可切回本机监听，数据库不会被重置。
+
+也可以使用 `wget`：
+
+```bash
+wget -qO- https://github.com/allury/monitor/releases/latest/download/install-server.sh | sudo sh
+```
+
+脚本会自动识别 `amd64`/`arm64`、下载对应二进制及 SHA-256 校验文件。也支持把文件上传到同一目录后离线安装：
+
+```bash
+sudo sh ./install-server.sh ./monitor-server-linux-amd64
+```
+
+安装脚本会创建低权限系统用户、写入 systemd 服务、初始化数据库并启动主控。首次安装时终端会显示一次管理员密钥，请立即保存。
+
+不要写成 `deploy/install-server.sh`；只有克隆了完整仓库才存在 `deploy` 目录。两个文件就在 `/root` 时，路径必须是 `./install-server.sh`。
+
+检查运行状态：
+
+```bash
+systemctl status monitor-server --no-pager
+journalctl -u monitor-server -n 100 --no-pager
+```
+
+### 探针
+
+主控后台创建节点后，会直接生成一条包含当前访问地址和节点密钥的一键安装命令。复制到被控服务器执行即可；用 IP 测试时会生成 HTTP 地址，换成反代域名访问后台后会生成 HTTPS 地址。形式如下：
+
+```bash
+curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-agent.sh | sudo sh -s -- --server 'https://monitor.example.com' --token '节点密钥'
+```
+
+也可以使用 `wget`：
+
+```bash
+wget -qO- https://github.com/allury/monitor/releases/latest/download/install-agent.sh | sudo sh -s -- --server 'https://monitor.example.com' --token '节点密钥'
+```
+
+脚本会自动识别架构、校验下载文件、写入 root 专有密钥文件并启动 systemd 服务。主控和探针安装脚本完全独立，安装探针不会安装主控。
+
+如果已手动上传文件，也可以交互安装；脚本会隐藏密钥输入：
+
+```bash
+sudo sh ./install-agent.sh ./monitor-agent-linux-amd64 https://monitor.example.com
+```
+
+检查运行状态：
+
+```bash
+systemctl status monitor-agent --no-pager
+journalctl -u monitor-agent -n 100 --no-pager
+```
+
+### 手动更新
+
+重新执行对应的一键安装命令即可。主控脚本会保留 `/var/lib/monitor/monitor.db` 和原管理员密钥；探针脚本会更新二进制、上报地址和节点密钥。项目不包含自动更新功能。
+
 ## 只做这些
 
 - CPU、负载、内存、Swap、硬盘、进程、连接数与在线状态
 - 电信、联通、移动三网 TCP 延迟
 - 实时网速、今日、本月和累计流量
-- 30 天分钟级历史数据（为后续图表保留，不增加管理功能）
+- 30 天分钟级历史数据
 - 单管理员后台：节点、三网延迟地址、站点文字
 
 不会加入通知、远程 SSH、插件、多用户权限、Windows/macOS 探针或自动更新。
 
 ## 安全边界
 
-- 探针仅读取 Linux 的 `/proc`、`/sys`、`/etc/os-release` 和指定挂载点，不写文件。
+- 探针进程仅读取 Linux 的 `/proc`、`/sys`、`/etc/os-release` 和指定挂载点，不写文件。
 - 每个节点使用独立的 256-bit 随机密钥；数据库只保存 SHA-256 摘要。
-- 只有一个管理员密钥，没有账号列表、角色或权限系统。数据库只保存密钥摘要，登录会话只存在主控内存中。
+- 只有一个管理员密钥，没有账号列表、角色或权限系统。登录会话只存在主控内存中。
 - WebSocket 上报限制为 64 KiB，字段长度和数值范围会在入库前校验。
-- 建议控制端只监听 `127.0.0.1`，由 Caddy/Nginx 提供 HTTPS；探针连接 `wss://` 地址。
-- `monitor-agent` 不包含主控、SQLite、网页、监听端口或管理命令，也没有自动更新和文件写入逻辑。
+- 主控默认只监听 `127.0.0.1:34331`；`--public` 可临时监听公网。探针支持 HTTP/WS 测试和 HTTPS/WSS 正式上报。
+- `monitor-agent` 不包含主控、SQLite、网页、监听端口、管理命令、自动更新或文件写入逻辑。
+- 两个 systemd 服务默认启用权限收紧选项；主控只能写 `/var/lib/monitor`，探针根文件系统只读。
 
-## 使用 GitHub 构建
+## GitHub 构建与发布
 
-推送到 GitHub 后，`CI` 会自动格式化检查、静态检查和测试。创建 `v*` 标签后，`Release` 会生成两个静态 Linux 二进制：
+推送代码后，`CI` 自动运行格式检查、Clippy 和测试。推送 `v*` 标签后，`Release` 自动生成四个静态 Linux 二进制、校验文件以及两个独立安装脚本：
 
 - `monitor-server-linux-amd64` / `monitor-server-linux-arm64`
 - `monitor-agent-linux-amd64` / `monitor-agent-linux-arm64`
-
-因此开发电脑不需要安装 Rust、Node.js 或 SQLite。
-
-## 快速开始
-
-### 1. 控制端
-
-下载与服务器架构对应的 Release 文件，重命名并赋予执行权限：
-
-```bash
-sudo install -m 0755 monitor-server-linux-amd64 /usr/local/bin/monitor-server
-sudo install -d -o monitor -g monitor /var/lib/monitor
-sudo -u monitor /usr/local/bin/monitor-server node create \
-  --db /var/lib/monitor/monitor.db \
-  --id hk-1 \
-  --name 香港
-```
-
-也可以先启动控制端，然后访问 `/admin` 创建节点。第一次启动会在终端打印一次管理员密钥。如果丢失，可在主控服务器本机执行：
-
-```bash
-sudo -u monitor /usr/local/bin/monitor-server admin reset \
-  --db /var/lib/monitor/monitor.db
-sudo systemctl restart monitor-server
-```
-
-创建节点时只显示一次节点密钥，请立即保存。主控默认只监听本机 `34331` 端口：
-
-```bash
-sudo -u monitor /usr/local/bin/monitor-server \
-  --listen 127.0.0.1:34331 \
-  --db /var/lib/monitor/monitor.db
-```
-
-生产环境可复制 [`deploy/monitor-server.service`](deploy/monitor-server.service) 到 `/etc/systemd/system/`。HTTPS 反向代理需要支持 WebSocket；Caddy 最小配置如下：
-
-```caddy
-monitor.example.com {
-    reverse_proxy 127.0.0.1:34331
-}
-```
-
-也可以用完全独立的主控安装脚本（不会安装探针）：
-
-```bash
-sudo sh deploy/install-server.sh ./monitor-server-linux-amd64
-```
-
-### 2. 探针
-
-先前生成的完整密钥已经包含节点 ID。临时运行：
-
-```bash
-MONITOR_TOKEN='hk-1.密钥内容' monitor-agent \
-  --server https://monitor.example.com
-```
-
-`--server` 填的就是对外 HTTPS 反向代理域名，不是 `127.0.0.1:34331`。探针会自动转换为 `wss://monitor.example.com/api/agent` 连接。
-
-长期运行时，将密钥写入 root 专有文件，并使用 hardened systemd 单元：
-
-```bash
-sudo install -m 0600 /dev/stdin /etc/monitor-agent.token <<'TOKEN'
-hk-1.密钥内容
-TOKEN
-sudo cp deploy/monitor-agent.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now monitor-agent
-```
-
-编辑单元中的 `--server` 地址后再启动。Agent 通过 systemd credential 读取密钥，密钥不会出现在命令行或普通环境变量中。
-
-或使用独立的探针安装脚本（不会安装主控）：
-
-```bash
-sudo sh deploy/install-agent.sh ./monitor-agent-linux-amd64 https://monitor.example.com
-```
-
-脚本会在终端隐藏输入节点密钥。两个脚本都不包含更新逻辑。
+- `install-server.sh` / `install-agent.sh`
 
 ## 命令
 
@@ -119,7 +125,7 @@ monitor-agent --server <URL> [--interval 2] [--disk /]
               [--telecom host:port] [--unicom host:port] [--mobile host:port]
 ```
 
-三网探测默认使用 TCP/80 地址。登录 `/admin` 可以统一修改，保存后立即下发到所有在线探针；探针参数和环境变量仅作为首次连接前的备用值：
+三网探测默认使用 TCP/80 地址。后台可以统一修改，保存后会立即下发到所有在线探针；探针参数和环境变量只作为首次连接前的备用值：
 
 ```bash
 monitor-agent --server https://monitor.example.com \
@@ -134,7 +140,7 @@ MONITOR_PING_MOBILE=ha-cm-v4.ip.zstaticcdn.com:80
 
 ## 数据与流量口径
 
-Agent 上报内核网卡累计计数，控制端按 `boot_id` 计算增量并持久化。首次接入只建立基线，不把安装前的流量算进来；Agent 重启不会重复累计，VPS 重启后也会从新一轮内核计数继续累加。回环网卡不计入流量；月流量按 UTC 自然月归零。
+探针上报内核网卡累计计数，主控按 `boot_id` 计算增量并持久化。首次接入只建立基线，不把安装前的流量算进来；探针重启不会重复累计，VPS 重启后也会从新一轮内核计数继续累加。回环网卡不计入流量；月流量按 UTC 自然月归零。
 
 SQLite 使用 WAL、8 MiB page cache 和批量写入。每 2 秒上报实时状态，每分钟最多落一个历史采样，自动保留 30 天。状态 API 与浏览器 WebSocket 共用同一份 2 秒 JSON 快照。
 
@@ -147,8 +153,8 @@ src/agent.rs                Linux 只读采集与上报
 src/server.rs               HTTP/WebSocket 与内存快照
 src/db.rs                   SQLite、节点密钥与流量累计
 src/ui/                     嵌入主控的状态页
-deploy/            完全分开的主控/探针安装脚本与 systemd 安全单元
-.github/workflows  无本地环境的 CI 与 Release 构建
+deploy/                     独立安装脚本与 systemd 安全单元
+.github/workflows/          CI 与 Release 构建
 ```
 
 许可证：[MIT](LICENSE)

@@ -57,7 +57,7 @@
             <div class="field"><label for="node-id">节点 ID</label><input class="input" id="node-id" placeholder="hk-1" maxlength="64" required /></div>
             <div class="field"><label for="node-name">显示名称</label><input class="input" id="node-name" placeholder="香港" maxlength="80" required /></div>
             <button class="button full" type="submit">创建节点</button>
-            <div class="token-box" id="token-box"><p>密钥只显示这一次，请立即保存到对应 VPS。</p><div class="token-line"><code id="node-token"></code><button class="button secondary small" id="copy-token" type="button">复制</button></div></div>
+            <div class="token-box" id="token-box"><p>复制到 Linux 被控服务器执行。命令包含只显示一次的节点密钥。</p><div class="token-line"><code id="node-install-command"></code><button class="button secondary small" id="copy-install-command" type="button">复制命令</button></div></div>
           </form>
         </div>
       </section>

@@ -72,5 +72,6 @@ jobs:
             deploy/install-server.sh \
             deploy/install-agent.sh \
             --repo "$GITHUB_REPOSITORY" \
-            --generate-notes \
+            --title "Monitor $GITHUB_REF_NAME" \
+            --notes-file README.md \
             --verify-tag

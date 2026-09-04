@@ -1,0 +1,30 @@
+name: Sync release descriptions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/releases/*.md
+      - .github/workflows/release-notes.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Update existing descriptions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for notes in docs/releases/*.md; do
+            tag="${notes##*/}"
+            tag="${tag%.md}"
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
+          done

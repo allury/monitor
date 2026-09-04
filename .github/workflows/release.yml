@@ -9,7 +9,11 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: verify
     strategy:
       fail-fast: false
       matrix:

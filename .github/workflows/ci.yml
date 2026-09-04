@@ -37,6 +37,8 @@ jobs:
           cargo build --release --bin monitor-server --features server
           cargo build --release --bin monitor-agent --features agent
       - name: Controller and agent integration
+        env:
+          MONITOR_TEST_SANDBOX: '1'
         run: node tests/integration.mjs target/release/monitor-server target/release/monitor-agent
       - name: Read-only service sandbox
         run: sh tests/check-sandbox.sh

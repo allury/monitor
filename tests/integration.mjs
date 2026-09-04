@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
-import {mkdtemp} from 'node:fs/promises';
+import {spawn, execFileSync} from 'node:child_process';
+import {mkdtemp, readFile, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import net from 'node:net';
@@ -26,7 +26,34 @@ async function port() {
 const serverPort = await port();
 const base = 'http://127.0.0.1:' + serverPort;
 let session = '', server, agent, probes, serverOutput = '';
+const sandbox = process.env.MONITOR_TEST_SANDBOX === '1';
+const sandboxUnit = 'monitor-integration-' + randomBytes(8).toString('hex');
+const sandboxBinary = '/run/' + sandboxUnit;
+let sandboxStarted = false, sandboxInstalled = false;
 const sockets = [];
+function stopAgent() {
+  if (sandboxStarted) {
+    try { execFileSync('sudo', ['systemctl', 'stop', sandboxUnit], {stdio:'ignore',timeout:15000}); } catch { /* best-effort test cleanup */ }
+    sandboxStarted = false;
+  }
+  agent?.kill('SIGTERM');
+}
+async function startAgent(token, target) {
+  const arguments_ = ['--server',base,'--telecom',target,'--unicom',target,'--mobile',target];
+  if (!sandbox) return spawn(agentBinary, arguments_, {env:{...process.env,MONITOR_TOKEN:token},stdio:'ignore'});
+  // Exercise the installed service's restrictions, including its credential channel.
+  const credential = join(directory, 'agent.token');
+  await writeFile(credential, token, {mode:0o600});
+  execFileSync('sudo', ['install','-m','0755',agentBinary,sandboxBinary], {stdio:'ignore'});
+  sandboxInstalled = true;
+  const unit = await readFile(new URL('../deploy/monitor-agent.service', import.meta.url), 'utf8');
+  const properties = unit.split(/\r?\n/).filter(line => /^(DynamicUser|NoNewPrivileges|Protect\w*|Private\w*|ReadOnlyPaths|InaccessiblePaths|SystemCallFilter|Restrict\w*|LockPersonality|MemoryDenyWriteExecute|CapabilityBoundingSet|SystemCallArchitectures|UMask)=/.test(line));
+  sandboxStarted = true;
+  return spawn('sudo', ['systemd-run','--quiet','--wait','--pipe','--collect','--unit=' + sandboxUnit,
+    ...properties.map(value => '--property=' + value), '--property=RuntimeMaxSec=100',
+    '--property=LoadCredential=token:' + credential, '--property=Environment=MONITOR_TOKEN_FILE=%d/token',
+    sandboxBinary, ...arguments_], {stdio:'ignore'});
+}
 async function api(path, body, method = body ? 'POST' : 'GET') {
   const response = await fetch(base + path, {method, headers: {'content-type':'application/json', authorization:'Bearer ' + session}, body: body ? JSON.stringify(body) : undefined});
   const value = response.status === 204 ? null : await response.json();
@@ -87,12 +114,13 @@ try {
   await new Promise(r => probes.listen(0, '127.0.0.1', r));
   const target = '127.0.0.1:' + probes.address().port;
   assert.equal((await api('/api/admin/latency', {telecom:target,unicom:target,mobile:target}, 'PUT')).status, 200);
-  agent = spawn(agentBinary, ['--server',base,'--telecom',target,'--unicom',target,'--mobile',target], {env:{...process.env,MONITOR_TOKEN:created.value.token},stdio:'ignore'});
+  agent = await startAgent(created.value.token, target);
   await until(async () => (await nodes())[0]?.online, 'Agent did not become online');
   const firstSeen = (await nodes())[0].last_seen;
   await wait(63500);
   const live = (await nodes())[0];
   assert.ok(live.online && live.last_seen - firstSeen >= 55, 'Status reporting stalled');
+  assert.ok(live.mem_total > 0 && live.disk_total > 0 && live.metrics.mem_used > 0, 'Read-only agent cannot collect required metrics');
   assert.ok(connections >= 9 && connections <= 12, 'TCP probes must run every 30 seconds, not every status report');
   const latency = await api('/api/nodes/test/history?kind=latency&hours=1');
   assert.equal(latency.status, 200);
@@ -110,7 +138,7 @@ try {
   assert.equal(rotated.status, 200);
   await assert.rejects(ws(created.value.token), /HTTP 401/);
   await until(async () => !(await nodes())[0]?.online, 'Old connection survived token rotation');
-  agent.kill('SIGTERM');
+  stopAgent();
   const first = await ws(rotated.value.token);
   const second = await ws(rotated.value.token);
   await until(() => first.closed, 'New connection did not close the previous connection');
@@ -124,9 +152,10 @@ try {
   const exited = new Promise(r => server.once('exit', r));
   server.kill('SIGTERM');
   assert.equal(await Promise.race([exited, wait(10000).then(() => 'timeout')]), 0, 'Controller did not drain and stop cleanly');
-  console.log('PASS: status cadence, 30-second probes, history, deep links, credential rotation, connection takeover, revocation, graceful shutdown');
+  console.log('PASS: status cadence, 30-second probes, history, deep links, credential rotation, connection takeover, revocation, graceful shutdown' + (sandbox ? ', hardened systemd agent' : ''));
 } finally {
-  agent?.kill('SIGTERM'); server?.kill('SIGTERM');
+  stopAgent(); server?.kill('SIGTERM');
   for (const socket of sockets) socket.destroy();
   probes?.close();
+  if (sandboxInstalled) execFileSync('sudo', ['unlink', sandboxBinary], {stdio:'ignore'});
 }

@@ -11,7 +11,7 @@
 }
 * { box-sizing:border-box; }
 html { background:var(--background); scrollbar-gutter:stable; }
-body { margin:0; min-width:320px; min-height:100svh; color:var(--foreground); background:var(--background); font-size:1rem; line-height:1.5; }
+body { margin:0; min-height:100svh; color:var(--foreground); background:var(--background); font-size:1rem; line-height:1.5; }
 button,input { font:inherit; }
 button,a { -webkit-tap-highlight-color:transparent; }
 a { color:inherit; }
@@ -23,9 +23,10 @@ svg { display:block; }
 .shell { width:calc(100% - 4.5rem); max-width:1600px; margin-inline:auto; }
 .site-header { border-bottom:1px solid var(--border); background:var(--background); }
 .header-inner { height:3.75rem; display:flex; align-items:center; justify-content:space-between; }
-.brand { display:inline-flex; align-items:center; gap:.5rem; text-decoration:none; font-size:1rem; font-weight:600; }
+.brand { display:inline-flex; min-width:0; align-items:center; gap:.5rem; text-decoration:none; font-size:1rem; font-weight:600; }
+.brand > span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .brand-mark { display:none; }
-.header-actions { display:flex; align-items:center; gap:1.25rem; }
+.header-actions { display:flex; flex:none; align-items:center; gap:1.25rem; margin-left:1rem; }
 .admin-link { text-decoration:none; font-size:.875rem; }
 .admin-link:hover,.back-link:hover { text-decoration:underline; }
 .icon-button { display:grid; place-items:center; width:2rem; height:2rem; border:0; border-radius:.4rem; background:transparent; color:inherit; }
@@ -79,7 +80,7 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
 .footer:empty { display:none; }
 .back-link { display:inline-block; font-size:.8125rem; color:var(--muted-foreground); text-decoration:none; margin-bottom:.65rem; }
 .detail-title { display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; }
-.detail-title h1 { margin:0; font-size:1.125rem; font-weight:550; }
+.detail-title h1 { margin:0; font-size:1.125rem; font-weight:550; overflow-wrap:anywhere; min-width:0; }
 .badge { display:inline-block; padding:.05rem .5rem; border:1px solid var(--border); border-radius:99px; font-size:.75rem; }
 .detail-facts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.8rem 2rem; margin:1rem 0; padding:0 0 1rem; border-bottom:1px solid var(--border); }
 .detail-facts div { min-width:0; }
@@ -90,7 +91,7 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
 .detail-tabs .selected,.time-ranges .selected { color:var(--background); background:var(--foreground); }
 .muted { color:var(--muted-foreground); font-size:.8125rem; }
 .chart-block { position:relative; margin:1rem 0 1.8rem; }
-.chart-block h2 { margin:0 0 .35rem; font-size:.8125rem; color:var(--muted-foreground); font-weight:400; }
+.chart-block h2 { margin:0 0 .35rem; font-size:.8125rem; color:var(--muted-foreground); font-weight:400; overflow-wrap:anywhere; }
 .chart-legend { display:flex; flex-wrap:wrap; gap:1rem; margin-bottom:.4rem; font-size:.8125rem; color:var(--muted-foreground); }
 .chart-legend span::before { content:""; display:inline-block; width:1rem; margin-right:.3rem; border-top:2px solid var(--foreground); vertical-align:middle; }
 .chart-legend .secondary::before { border-top-style:dashed; }
@@ -139,7 +140,7 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
 .node-table th { color: var(--muted-foreground); font-weight: 520; }
 .node-table tr:last-child td { border-bottom: 0; }
 .node-table td:last-child, .node-table th:last-child { text-align: right; }
-.inline-status { display: inline-flex; align-items: center; gap: 0.38rem; color: var(--muted-foreground); }
+.inline-status { display: inline-flex; align-items: center; gap: 0.38rem; color: var(--muted-foreground); white-space: nowrap; }
 .inline-status::before { content: ""; width: 0.4rem; height: 0.4rem; border-radius: 50%; background: var(--danger); }
 .inline-status.online::before { background: var(--ok); }
 .settings-form { max-width: 38rem; }

@@ -2,7 +2,11 @@ const $ = selector => document.querySelector(selector);
 const nodesRoot = $("#nodes");
 let payload = null, receivedAt = 0, socket = null, fallbackTimer = null, reconnectTimer = null;
 let stopped = false, polling = false, activeTab = "resources", hours = 6, historyData = null, historyRequest = null;
-const detailId = location.pathname.startsWith("/node/") ? decodeURIComponent(location.pathname.slice(6)) : null;
+let detailId = null, detailCapacity = null;
+if (location.pathname.startsWith("/node/")) {
+  try { detailId = decodeURIComponent(location.pathname.slice(6)); }
+  catch { detailId = location.pathname.slice(6); }
+}
 $("#home-view").hidden = !!detailId;
 $("#detail-view").hidden = !detailId;
 
@@ -74,7 +78,11 @@ function render() {
   $("#updated-at").textContent = isStale() ? "连接已断开 · 保留 " + updated + " 的数据" : updated + " 更新";
   if (detailId) {
     const node = nodes.find(n => n.id === detailId);
-    if (node) detail(node);
+    if (node) {
+      detail(node);
+      const capacity = node.mem_total + ":" + node.disk_total;
+      if (capacity !== detailCapacity) { detailCapacity = capacity; drawHistory(); }
+    }
     else $("#node-detail").innerHTML = '<div class="empty-card"><h2>节点不存在或已停用</h2></div>';
     return;
   }
@@ -144,7 +152,8 @@ function chart(title, points, series, maximum) {
     tooltip.textContent = new Date(p.at * 1000).toLocaleString("zh-CN", {hour12:false}) + " · " + series.map(s => s.label + " " + s.format(p[s.key]) + (s.failure ? " · 失败 " + p[s.failure] + "/" + p.count : "")).join(" · ");
   };
   svg.addEventListener("pointermove", e => {
-    const at = historyData.from + Math.max(0, Math.min(1, (e.offsetX - left) / (right - left))) * (historyData.to - historyData.from);
+    const rect = svg.getBoundingClientRect(), px = (e.clientX - rect.left) * width / rect.width;
+    const at = historyData.from + Math.max(0, Math.min(1, (px - left) / (right - left))) * (historyData.to - historyData.from);
     selected = points.reduce((best, p, i) => Math.abs(p.at - at) < Math.abs(points[best].at - at) ? i : best, 0); show(selected);
   });
   svg.addEventListener("pointerleave", () => tooltip.hidden = true);

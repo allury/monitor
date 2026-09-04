@@ -4,8 +4,8 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 
 const source = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8');
-function context() {
-  const context = vm.createContext({document:{querySelector:() => ({hidden:false})},location:{pathname:'/'}});
+function context(pathname = '/') {
+  const context = vm.createContext({document:{querySelector:() => ({hidden:false})},location:{pathname}});
   vm.runInContext(source.slice(0, source.indexOf('for (const button of')), context);
   return context;
 }
@@ -30,4 +30,8 @@ test('stale browser data never continues to label nodes online', () => {
   vm.runInContext('payload={generated_at:Date.now()/1000}; receivedAt=Date.now()-13000', sandbox);
   assert.equal(vm.runInContext('isOnline({online:true,last_seen:Date.now()/1000})', sandbox), false);
   assert.ok(vm.runInContext('status({online:true})', sandbox).includes('数据过期'));
+});
+test('malformed detail links do not crash the page', () => {
+  assert.equal(vm.runInContext('detailId', context('/node/%E0%A4%A')), '%E0%A4%A');
+  assert.equal(vm.runInContext('detailId', context('/node/hk-1')), 'hk-1');
 });

@@ -1,3 +1,6 @@
+export function mountAdmin() {
+const lifetime = new AbortController();
+let alive = true, commandNode = null, commandRequest = null;
 let session = sessionStorage.getItem("monitor-admin-session") || "";
 let currentState = null;
 let toastTimer = null;
@@ -24,25 +27,104 @@ function agentInstallCommand(token) {
   return `curl -fsSL ${installer} | sudo sh -s -- --server ${shellQuote(window.location.origin)} --token ${shellQuote(token)}`;
 }
 
+function agentUpdateCommand() {
+  return "curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-agent.sh | sudo sh -s -- --update";
+}
+
+function nodeToken(node) {
+  if (["hash_only", "encrypted", "redacted"].includes(node?.token_status)) return "";
+  for (const key of ["token", "secret", "client_secret", "key"]) {
+    const value = node?.[key];
+    if (typeof value !== "string") continue;
+    const token = value.trim();
+    if (token && !/[*•●…]/.test(token) && !/^(?:\[?redacted\]?|\[?masked\]?|null|undefined)$/i.test(token)) return token;
+  }
+  return "";
+}
+
+function clearCommands() {
+  commandRequest?.abort(); commandRequest = null; commandNode = null;
+  document.querySelector("#node-token").value = "";
+  document.querySelector("#node-token").type = "password";
+  document.querySelector("#node-install-command").textContent = "";
+  document.querySelector("#credential-controls").hidden = true;
+}
+
+function renderCredentials(node) {
+  commandNode = node;
+  const token = nodeToken(node);
+  document.querySelector("#node-token").value = token;
+  document.querySelector("#node-token").type = "password";
+  document.querySelector("#toggle-node-token").textContent = "查看密钥";
+  document.querySelector("#toggle-node-token").setAttribute("aria-pressed", "false");
+  document.querySelector("#credential-controls").hidden = !token;
+  document.querySelector("#node-install-command").textContent = token ? agentInstallCommand(token) : "";
+  document.querySelector("#node-token-note").textContent = token
+    ? "密钥仅在创建或重置时显示。请保存首次安装命令，关闭后不会在主控保留明文。"
+    : "主控只保存不可逆摘要，无法再次显示原密钥。已安装探针可直接使用上方更新命令；新机器安装且未保存原密钥时，才需要重置。";
+}
+
+async function openCommands(node, lookup = true) {
+  clearCommands(); commandNode = node;
+  const dialog = document.querySelector("#node-dialog");
+  document.querySelector("#command-node-name").textContent = (node.name || node.id) + " · 安装与更新";
+  // Updating an existing installation never depends on a plaintext credential or API success.
+  document.querySelector("#node-update-command").textContent = agentUpdateCommand();
+  document.querySelector("#node-command-error").textContent = "";
+  document.querySelector("#reset-node-token").disabled = false;
+  renderCredentials(node);
+  if (!dialog.open) dialog.showModal();
+  if (!lookup || nodeToken(node)) return;
+  const request = new AbortController(); commandRequest = request;
+  try {
+    const detail = await api(`/nodes/${encodeURIComponent(node.id)}`, {signal:request.signal});
+    if (commandRequest === request && dialog.open) renderCredentials(detail);
+  } catch (error) {
+    if (error.name !== "AbortError" && alive && dialog.open) document.querySelector("#node-command-error").textContent = error.message + "。更新命令仍可复制；它不会更改密钥或恢复已停用的节点。";
+  }
+}
+
+async function copyText(value, message) {
+  if (!value) return;
+  try {
+    if (!navigator.clipboard || !window.isSecureContext) throw new Error();
+    await navigator.clipboard.writeText(value);
+  } catch {
+    if (!alive) return;
+    const input = document.createElement("textarea"), focused = document.activeElement;
+    input.value = value; input.className = "sr-only";
+    const dialog = document.querySelector("#node-dialog");
+    (dialog.open ? dialog : document.body).append(input);
+    input.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch { /* 提示用户手动复制 */ }
+    input.remove(); focused?.focus();
+    if (!copied) { toast("无法自动复制，请选择文字手动复制；密钥可先点击查看"); return; }
+  }
+  toast(message);
+}
+
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
   if (session) headers.authorization = `Bearer ${session}`;
   if (options.body) headers["content-type"] = "application/json";
-  const response = await fetch(`/api/admin${path}`, {...options, headers});
+  const signal = AbortSignal.any([lifetime.signal, options.signal || AbortSignal.timeout(10000)]);
+  const response = await fetch(`/api/admin${path}`, {...options, headers, cache:"no-store", signal});
   if (response.status === 401 && path !== "/login") showLogin();
   const body = response.status === 204 ? null : await response.json().catch(() => ({}));
+  if (!alive) throw new DOMException("Page closed", "AbortError");
   if (!response.ok) throw new Error(body?.error || `请求失败 (${response.status})`);
   return body;
 }
 
 function showLogin() {
+  if (!alive) return;
   session = "";
   sessionStorage.removeItem("monitor-admin-session");
   loginView.classList.remove("hidden");
   adminView.classList.add("hidden");
   logoutButton.classList.add("hidden");
-  document.querySelector("#node-install-command").textContent = "";
-  document.querySelector("#token-box").classList.remove("show");
+  document.querySelector("#node-dialog").close(); clearCommands(); currentState = null;
 }
 
 function showAdmin() {
@@ -52,6 +134,7 @@ function showAdmin() {
 }
 
 function toast(message) {
+  if (!alive) return;
   const element = document.querySelector("#toast");
   element.textContent = message;
   element.classList.remove("hidden");
@@ -68,7 +151,7 @@ function renderNodes(nodes) {
   root.innerHTML = `<table class="node-table"><thead><tr><th>名称</th><th>ID</th><th>状态</th><th>操作</th></tr></thead><tbody>${nodes.map(node => `<tr>
     <td>${escapeHtml(node.name)}</td><td><code>${escapeHtml(node.id)}</code></td>
     <td><span class="inline-status ${node.online ? "online" : ""}">${node.online ? "在线" : "离线"}</span></td>
-    <td><button class="button secondary small" type="button" data-rotate="${escapeHtml(node.id)}">重置密钥</button> <button class="button danger small" type="button" data-revoke="${escapeHtml(node.id)}">停用</button></td>
+    <td><div class="node-actions"><button class="button secondary small" type="button" data-commands="${escapeHtml(node.id)}">安装 / 更新</button><button class="button danger small" type="button" data-revoke="${escapeHtml(node.id)}">停用</button></div></td>
   </tr>`).join("")}</tbody></table>`;
 }
 
@@ -83,7 +166,7 @@ function renderState(state) {
   const site = state.settings.site;
   document.querySelector("#site-name").value = site.name;
   document.querySelector("#site-description").value = site.description;
-  document.querySelector("#site-footer").value = site.footer;
+  document.querySelector("#site-footer").value = site.footer || "";
   document.querySelector(".brand > span:last-child").textContent = site.name;
   document.title = `管理 · ${site.name}`;
 }
@@ -136,8 +219,7 @@ document.querySelector("#node-form").addEventListener("submit", async event => {
         name: document.querySelector("#node-name").value.trim(),
       }),
     });
-    document.querySelector("#node-install-command").textContent = agentInstallCommand(result.token);
-    document.querySelector("#token-box").classList.add("show");
+    await openCommands(result, false);
     document.querySelector("#node-id").value = "";
     document.querySelector("#node-name").value = "";
     await loadState();
@@ -145,33 +227,34 @@ document.querySelector("#node-form").addEventListener("submit", async event => {
   } catch (error) { toast(error.message); }
 });
 
-document.querySelector("#copy-install-command").addEventListener("click", async () => {
-  const value = document.querySelector("#node-install-command").textContent;
+document.querySelector("#copy-install-command").addEventListener("click", () => copyText(document.querySelector("#node-install-command").textContent, "安装命令已复制"));
+document.querySelector("#copy-update-command").addEventListener("click", () => copyText(agentUpdateCommand(), "更新命令已复制"));
+document.querySelector("#copy-node-token").addEventListener("click", () => copyText(nodeToken(commandNode), "密钥已复制"));
+document.querySelector("#close-node-dialog").addEventListener("click", () => document.querySelector("#node-dialog").close());
+document.querySelector("#node-dialog").addEventListener("close", clearCommands);
+document.querySelector("#toggle-node-token").addEventListener("click", () => {
+  const input = document.querySelector("#node-token"), button = document.querySelector("#toggle-node-token"), show = input.type === "password";
+  input.type = show ? "text" : "password";
+  button.textContent = show ? "隐藏密钥" : "查看密钥"; button.setAttribute("aria-pressed", String(show));
+});
+document.querySelector("#reset-node-token").addEventListener("click", async () => {
+  const id = commandNode?.id;
+  if (!id || !confirm(`重置节点 ${id} 的密钥？旧连接会断开，需要执行新安装命令。普通更新不需要重置。`)) return;
+  const button = document.querySelector("#reset-node-token"); button.disabled = true;
+  commandRequest?.abort(); commandRequest = null;
   try {
-    if (!navigator.clipboard || !window.isSecureContext) throw new Error();
-    await navigator.clipboard.writeText(value);
-    toast("安装命令已复制");
-  } catch {
-    const range = document.createRange();
-    range.selectNodeContents(document.querySelector("#node-install-command"));
-    const selection = getSelection();
-    selection.removeAllRanges(); selection.addRange(range);
-    let copied = false;
-    try { copied = document.execCommand("copy"); } catch { /* 保留选择供手动复制 */ }
-    toast(copied ? "安装命令已复制" : "命令已选中，请按 Ctrl+C 或长按复制");
-  }
+    const result = await api(`/nodes/${encodeURIComponent(id)}/token`, {method:"POST"});
+    if (commandNode?.id === id && document.querySelector("#node-dialog").open) renderCredentials(result);
+    await loadState(); toast("密钥已重置，请保存并执行新安装命令");
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
 });
 
 document.querySelector("#node-list").addEventListener("click", async event => {
-  const rotate = event.target.closest("[data-rotate]");
-  if (rotate) {
-    if (!confirm(`重置节点 ${rotate.dataset.rotate} 的密钥？旧连接会断开，需要执行新安装命令。`)) return;
-    try {
-      const result = await api(`/nodes/${encodeURIComponent(rotate.dataset.rotate)}/token`, {method: "POST"});
-      document.querySelector("#node-install-command").textContent = agentInstallCommand(result.token);
-      document.querySelector("#token-box").classList.add("show");
-      await loadState(); toast("密钥已重置，请执行新安装命令");
-    } catch (error) { toast(error.message); }
+  const commands = event.target.closest("[data-commands]");
+  if (commands) {
+    const node = currentState?.nodes?.find(node => node.id === commands.dataset.commands);
+    if (node) await openCommands(node);
     return;
   }
   const button = event.target.closest("[data-revoke]");
@@ -222,3 +305,7 @@ document.querySelector("#site-form").addEventListener("submit", async event => {
 });
 
 if (session) loadState(); else showLogin();
+return {kind:"admin", dispose() {
+  clearCommands(); alive = false; lifetime.abort(); clearTimeout(toastTimer); currentState = null; session = "";
+}};
+}

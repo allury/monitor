@@ -32,7 +32,8 @@ jobs:
           node --check src/ui/app.js
           node --check src/ui/admin.js
           node --check src/ui/theme.js
-          node --test tests/ui.test.mjs
+          node --check src/ui/navigation.js
+          node --test tests/*.test.mjs
       - name: Read-only service sandbox
         run: sh tests/check-sandbox.sh
       - name: Release builds

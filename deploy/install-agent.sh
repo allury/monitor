@@ -8,10 +8,13 @@ downloaded_checksum=
 binary_path=
 server_url=
 token=
+update_only=false
+update_dir=
 
 usage() {
     echo "用法: $0 [--binary 文件] --server http(s)://主控地址 [--token 节点密钥]" >&2
     echo "兼容用法: $0 ./monitor-agent-linux-amd64 http(s)://主控地址" >&2
+    echo "更新已安装探针: $0 --update [--binary 文件]（保留地址、密钥和服务配置）" >&2
 }
 
 require_command() {
@@ -35,6 +38,10 @@ download_file() {
 }
 
 cleanup() {
+    if [ -n "$update_dir" ]; then
+        rm -f -- "$update_dir/next" "$update_dir/previous"
+        rmdir -- "$update_dir" 2>/dev/null || true
+    fi
     if [ -n "$downloaded_binary" ]; then
         rm -f -- "$downloaded_binary"
     fi
@@ -54,6 +61,10 @@ fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --update)
+            update_only=true
+            shift
+            ;;
         --binary | -b)
             if [ "$#" -lt 2 ]; then
                 usage
@@ -107,14 +118,34 @@ while [ "$#" -gt 0 ]; do
 done
 set --
 
-if [ -z "$server_url" ]; then
-    echo "缺少主控地址。" >&2
-    usage
-    exit 1
-fi
-if ! printf '%s\n' "$server_url" | grep -Eq '^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$'; then
-    echo "主控地址格式无效，例如 http://192.0.2.10:34331 或 https://monitor.example.com。" >&2
-    exit 1
+if [ "$update_only" = true ]; then
+    if [ -n "$server_url" ] || [ -n "$token" ]; then
+        echo "--update 不接受地址或密钥；修改连接配置请使用完整安装命令。" >&2
+        exit 1
+    fi
+    require_command systemctl
+    if [ ! -f /usr/local/bin/monitor-agent ] || [ ! -x /usr/local/bin/monitor-agent ] || [ -L /usr/local/bin/monitor-agent ]; then
+        echo "找不到本项目安装的探针，请先执行后台提供的首次安装命令。" >&2
+        exit 1
+    fi
+    service_binary=$(systemctl show monitor-agent --property=ExecStart --value)
+    case "$service_binary" in
+        *'path=/usr/local/bin/monitor-agent ;'*) ;;
+        *)
+            echo "monitor-agent 服务不存在或使用其他程序路径，未更改任何配置。" >&2
+            exit 1
+            ;;
+    esac
+else
+    if [ -z "$server_url" ]; then
+        echo "缺少主控地址。" >&2
+        usage
+        exit 1
+    fi
+    if ! printf '%s\n' "$server_url" | grep -Eq '^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?$'; then
+        echo "主控地址格式无效，例如 http://192.0.2.10:34331 或 https://monitor.example.com。" >&2
+        exit 1
+    fi
 fi
 
 case "$(uname -m)" in
@@ -156,6 +187,32 @@ fi
 for command_name in install systemctl; do
     require_command "$command_name"
 done
+
+if [ "$update_only" = true ]; then
+    for command_name in mktemp cp mv; do
+        require_command "$command_name"
+    done
+    # Stage beside the installed binary so replacement and rollback are atomic.
+    # Do not read, rewrite or print the credential or the systemd unit/drop-ins.
+    update_dir=$(mktemp -d /usr/local/bin/.monitor-agent-update.XXXXXX)
+    cp -p -- /usr/local/bin/monitor-agent "$update_dir/previous"
+    install -m 0755 "$binary_path" "$update_dir/next"
+    mv -f -- "$update_dir/next" /usr/local/bin/monitor-agent
+    if systemctl restart monitor-agent && sleep 1 && systemctl is-active --quiet monitor-agent; then
+        echo "探针更新完成；原上报地址、密钥和服务配置未更改。"
+        echo "查看状态: systemctl status monitor-agent --no-pager"
+        exit 0
+    fi
+    echo "更新后启动失败，正在恢复原程序。" >&2
+    if ! mv -f -- "$update_dir/previous" /usr/local/bin/monitor-agent; then
+        echo "恢复失败，原程序保留在 $update_dir/previous，请手动恢复。" >&2
+        update_dir=
+        exit 1
+    fi
+    systemctl restart monitor-agent || true
+    echo "已恢复原程序，地址、密钥和服务配置未更改。" >&2
+    exit 1
+fi
 
 if [ -z "$token" ]; then
     printf '请粘贴后台创建节点时显示的节点密钥: '

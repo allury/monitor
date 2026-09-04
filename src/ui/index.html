@@ -10,17 +10,19 @@
   <link rel="stylesheet" href="/assets/app.css">
   <title>Monitor</title>
 </head>
-<body>
+<body class="status-page">
   <header class="site-header">
     <div class="shell header-inner">
-      <a class="brand" href="/"><span>Monitor</span></a>
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 13h4l2-7 4 13 2-6h6"/></svg></span><span>Monitor</span></a>
       <div class="header-actions">
         <span class="connection" id="connection" role="status"><i></i><span>连接中</span></span>
-        <a class="admin-link" href="/admin">管理</a>
+        <div class="action-capsule">
+        <a class="admin-link" href="/admin"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="5"/><path d="m11.5 11.5 9 9M17 16l3-3M14 13l3-3"/></svg>登录</a>
         <button class="icon-button" id="theme-toggle" type="button" aria-label="切换主题">
           <svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M5 5l1.5 1.5M17.5 17.5L19 19M2 12h2M20 12h2M5 19l1.5-1.5M17.5 6.5L19 5"/></svg>
           <svg class="moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
         </button>
+        </div>
       </div>
     </div>
   </header>
@@ -29,10 +31,10 @@
     <section id="home-view">
       <h1 class="sr-only">服务器状态</h1>
       <section class="overview" aria-label="总览">
-        <article class="summary-card"><div class="summary-label">节点</div><strong class="summary-number" id="node-count">—</strong><span class="summary-note" id="offline-label">等待数据</span></article>
-        <article class="summary-card"><div class="summary-label">最忙节点</div><strong class="summary-number" id="busy-value">—</strong><span class="summary-note" id="busy-node">—</span></article>
-        <article class="summary-card"><div class="summary-label">今日流量</div><div class="duplex" id="today-traffic">—</div><div class="summary-label secondary-label">总流量</div><div class="duplex" id="total-traffic">—</div></article>
-        <article class="summary-card"><div class="summary-label">实时网速</div><div class="duplex" id="live-speed">—</div></article>
+        <article class="summary-card"><div class="summary-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01"/></svg>节点</div><strong class="summary-number" id="node-count">—</strong><span class="summary-note" id="offline-label">等待数据</span></article>
+        <article class="summary-card"><div class="summary-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h5l3-9 4 18 3-9h5"/></svg>最忙节点</div><strong class="summary-number" id="busy-value">—</strong><span class="summary-note" id="busy-node">—</span></article>
+        <article class="summary-card"><div class="summary-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4"/></svg>今日流量</div><div class="duplex" id="today-traffic">—</div><div class="summary-label secondary-label">总流量</div><div class="duplex" id="total-traffic">—</div></article>
+        <article class="summary-card"><div class="summary-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18a10 10 0 1 1 18 0M12 13l5-5"/><circle cx="12" cy="13" r="1"/></svg>实时网速</div><div class="duplex" id="live-speed">—</div><div id="speed-trend" class="speed-trend" aria-label="本页最近两分钟实时网速"><span class="trend-empty">等待实时采样</span></div></article>
       </section>
       <div class="node-grid" id="nodes"><div class="empty-card"><h2>正在连接</h2><p>等待节点数据。</p></div></div>
     </section>
@@ -51,7 +53,7 @@
     </section>
     <p id="updated-at" class="updated-at" role="status"></p>
   </main>
-  <footer class="shell footer"></footer>
-  <script src="/assets/app.js" defer></script>
+  <footer class="shell footer" hidden></footer>
+  <script src="/assets/navigation.js" type="module"></script>
 </body>
 </html>

@@ -105,7 +105,7 @@ impl Default for SiteSettings {
         Self {
             name: "Monitor".to_owned(),
             description: "服务器状态".to_owned(),
-            footer: "只读状态页 · 数据每 2 秒刷新".to_owned(),
+            footer: String::new(),
         }
     }
 }

@@ -110,6 +110,23 @@ try {
   const created = await api('/api/admin/nodes', {id:'test',name:'测试节点'});
   assert.equal(created.status, 201);
   assert.equal((await api('/api/admin/nodes', {id:'test',name:'duplicate'})).status, 400);
+  assert.equal((await fetch(base + '/api/admin/nodes/test')).status, 401, 'Node details must require an administrator');
+  let detail = await api('/api/admin/nodes/test');
+  assert.equal(detail.status, 200);
+  assert.equal(detail.value.token, null);
+  assert.equal(detail.value.token_status, 'hash_only');
+  assert.ok(!JSON.stringify(detail.value).includes('token_hash'));
+  assert.equal((await api('/api/admin/nodes/missing')).status, 404);
+  // A controller restart/upgrade must retain the existing administrator and node credentials.
+  const restarted = new Promise(r => server.once('exit', r));
+  server.kill('SIGTERM'); assert.equal(await restarted, 0);
+  server = spawn(serverBinary, ['--listen','127.0.0.1:' + serverPort,'--db',database], {stdio:['ignore','pipe','pipe']});
+  await until(async () => { try { return (await fetch(base + '/api/health')).ok; } catch { return false; } }, 'Controller did not restart');
+  assert.equal((await api('/api/admin/nodes/test')).status, 401, 'Restarted controller must reject old sessions');
+  const relogin = await api('/api/admin/login', {password});
+  assert.equal(relogin.status, 200); session = relogin.value.token;
+  detail = await api('/api/admin/nodes/test');
+  assert.equal(detail.status, 200); assert.equal(detail.value.id, 'test');
   let connections = 0;
   probes = net.createServer(socket => { connections++; socket.end(); });
   await new Promise(r => probes.listen(0, '127.0.0.1', r));
@@ -138,6 +155,7 @@ try {
   assert.equal(document.status, 200);
   assert.ok((await document.text()).includes('id="detail-view"'));
   assert.equal((await fetch(base + '/assets/theme.js')).headers.get('cache-control'), 'no-cache');
+  assert.ok((await (await fetch(base + '/assets/navigation.js')).text()).includes('mountStatus'));
   const rotated = await api('/api/admin/nodes/test/token', {});
   assert.equal(rotated.status, 200);
   await assert.rejects(ws(created.value.token), /HTTP 401/);
@@ -152,6 +170,7 @@ try {
   await until(() => second.closed, 'Revocation did not close the live connection');
   await assert.rejects(ws(rotated.value.token), /HTTP 401/);
   assert.equal((await api('/api/nodes/test/history?hours=1')).status, 404);
+  assert.equal((await api('/api/admin/nodes/test')).status, 404);
   for (const socket of sockets) socket.destroy();
   const exited = new Promise(r => server.once('exit', r));
   server.kill('SIGTERM');

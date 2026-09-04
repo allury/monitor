@@ -2,6 +2,8 @@
 
 ## Publish a version
 
+Use semantic versioning: compatible features increment the minor version, compatible fixes increment the patch version, and incompatible changes require an explicit compatibility review and major version increment. During the 0.x development phase, document any incompatibility in a minor release. Keep unreleased changes marked as such; changing Cargo's version does not authorize publication. Only advance `.github/release-version` when publication is approved.
+
 Update the package version in Cargo.toml and Cargo.lock, then set `.github/release-version` to the matching `vX.Y.Z` and push to main. Alternatively, push a matching version tag. The Release workflow validates the version, runs CI, builds all four Linux artifacts, and only then creates the GitHub Release and tag at the tested commit.
 
 All publishing and artifact uploads are performed by GitHub Actions. An existing release is never overwritten, and an existing tag must resolve to the tested commit. Publishing does not deploy or update any monitored server.

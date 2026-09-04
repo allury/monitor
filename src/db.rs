@@ -155,9 +155,12 @@ pub fn load_settings(connection: &Connection) -> Result<AppSettings> {
     let latency = setting(connection, "latency_targets")?
         .and_then(|value| serde_json::from_str::<LatencyTargets>(&value).ok())
         .unwrap_or_default();
-    let site = setting(connection, "site")?
+    let mut site = setting(connection, "site")?
         .and_then(|value| serde_json::from_str::<SiteSettings>(&value).ok())
         .unwrap_or_default();
+    if site.footer == "只读状态页 · 数据每 2 秒刷新" {
+        site.footer.clear();
+    }
     let latency_revision = setting(connection, "latency_revision")?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
@@ -782,6 +785,7 @@ mod tests {
     #[test]
     fn migration_preserves_v1_state_and_rejects_future_schema() {
         let (_dir, path, mut node) = fixture();
+        let original_hash = node.token_hash.clone();
         node.total_rx = 99;
         let mut connection = open(&path).unwrap();
         persist_batch(
@@ -798,7 +802,9 @@ mod tests {
             .unwrap();
         drop(connection);
         let connection = open(&path).unwrap();
-        assert_eq!(load_nodes(&connection).unwrap()[0].total_rx, 99);
+        let migrated = load_nodes(&connection).unwrap().remove(0);
+        assert_eq!(migrated.total_rx, 99);
+        assert_eq!(migrated.token_hash, original_hash);
         assert_eq!(
             connection
                 .query_row("SELECT COUNT(*) FROM samples", [], |r| r.get::<_, i64>(0))

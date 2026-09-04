@@ -13,7 +13,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -131,6 +131,7 @@ pub async fn run(options: ServerOptions) -> Result<()> {
         .route("/assets/app.css", get(styles))
         .route("/assets/app.js", get(script))
         .route("/assets/admin.js", get(admin_script))
+        .route("/assets/navigation.js", get(navigation_script))
         .route("/assets/theme.js", get(theme_script))
         .route("/favicon.svg", get(favicon))
         .route("/api/health", get(health))
@@ -142,7 +143,10 @@ pub async fn run(options: ServerOptions) -> Result<()> {
         .route("/api/admin/logout", post(admin_logout))
         .route("/api/admin/state", get(admin_state))
         .route("/api/admin/nodes", post(admin_create_node))
-        .route("/api/admin/nodes/{id}", delete(admin_revoke_node))
+        .route(
+            "/api/admin/nodes/{id}",
+            get(admin_node).delete(admin_revoke_node),
+        )
         .route("/api/admin/nodes/{id}/token", post(admin_rotate_token))
         .route("/api/admin/latency", put(admin_save_latency))
         .route("/api/admin/site", put(admin_save_site))
@@ -605,6 +609,14 @@ struct AdminStateResponse {
     nodes: Vec<NodeView>,
 }
 
+#[derive(Debug, Serialize)]
+struct AdminNodeResponse {
+    #[serde(flatten)]
+    node: NodeView,
+    token: Option<String>,
+    token_status: &'static str,
+}
+
 async fn admin_login(State(state): State<AppState>, Json(request): Json<LoginRequest>) -> Response {
     if request.password.len() > 256 {
         return json_error(StatusCode::UNAUTHORIZED, "管理员密钥错误");
@@ -687,6 +699,30 @@ async fn admin_create_node(
         Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, &error.to_string()),
         Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "创建节点失败"),
     }
+}
+
+async fn admin_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_admin(&state, &headers).await {
+        return json_error(StatusCode::UNAUTHORIZED, "请先登录");
+    }
+    let nodes = state.nodes.read().await;
+    let Some(node) = nodes.get(&id) else {
+        return json_error(StatusCode::NOT_FOUND, "节点不存在或已停用");
+    };
+    // All released schemas store only token_hash. Never expose it as a credential
+    // or invent a plaintext fallback. Creation/rotation return the token once.
+    json_value(
+        StatusCode::OK,
+        &AdminNodeResponse {
+            node: node.as_view(Utc::now().timestamp()),
+            token: None,
+            token_status: "hash_only",
+        },
+    )
 }
 
 async fn admin_revoke_node(
@@ -944,6 +980,13 @@ async fn admin_script() -> Response {
     static_response(
         "text/javascript; charset=utf-8",
         include_str!("ui/admin.js"),
+    )
+}
+
+async fn navigation_script() -> Response {
+    static_response(
+        "text/javascript; charset=utf-8",
+        include_str!("ui/navigation.js"),
     )
 }
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0 - Unreleased
+
+### Added
+
+- Manual agent update mode that preserves installed credentials, endpoint and service configuration.
+- Administrator node detail and installation/update dialog with explicit hash-only credential status.
+- Bounded live network sparklines and chart cursors with click/touch pinning and keyboard selection.
+- In-page navigation between the status page, node details and administrator view.
+
+### Changed
+
+- Aligned navigation, overview and four-column node cards with the reference layout.
+- Shortened system labels and standardized resource/transfer units; preserved monthly traffic markup and binary units.
+- Made the default footer empty while retaining the optional setting.
+
+### Fixed
+
+- Kept update commands available when a credential is unavailable or a node detail request fails.
+- Added atomic binary replacement and rollback when the updated agent cannot restart.
+- Verified credential retention across database migration and controller restart.
+
 ## 0.2.0 - 2026-09-04
 
 ### Added

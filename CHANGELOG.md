@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 - 2026-09-04
+
+### Changed
+
+- Removed public-page explanatory paragraphs, repeated back navigation and sampling placeholders.
+- Shortened detail system labels and latency chart titles without changing recorded metrics or failure indicators.
+- Kept site descriptions as page metadata and preserved administrator settings and optional footers.
+
 ## 0.3.0 - 2026-09-04
 
 ### Added

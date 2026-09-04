@@ -52,16 +52,19 @@ function status(node) {
   const online = isOnline(node), stale = isStale();
   return '<span class="status ' + (stale ? "stale" : online ? "online" : "") + '">' + (stale ? "数据过期" : online ? "在线 " + uptime(node.metrics?.uptime) : "离线") + "</span>";
 }
-function systemLabel(node) {
-  let os = String(node.os || "").replace(/\([^)]*\)/g, "").replace(/GNU\/Linux/gi, "").replace(/\bLTS\b/gi, "").replace(/\s+/g, " ").trim();
+function shortOs(value) {
+  let os = String(value || "").replace(/\([^)]*\)/g, "").replace(/GNU\/Linux/gi, "").replace(/\bLTS\b/gi, "").replace(/\s+/g, " ").trim();
   const version = os.match(/^(.*?)\s+v?(\d+)(?:\.(\d+))?/i);
   if (version) {
     const name = version[1].trim();
     const minor = /^(Ubuntu|Alpine(?: Linux)?)$/i.test(name) && version[3] ? "." + version[3] : "";
     os = name + " " + version[2] + minor;
   }
-  const virtualization = node.virtualization === "virtualized" ? "vm" : node.virtualization;
-  return [os, virtualization, node.arch].filter(Boolean).join(" · ") || "等待首次上报";
+  return os;
+}
+const shortVirtualization = value => value === "virtualized" ? "vm" : value;
+function systemLabel(node) {
+  return [shortOs(node.os), shortVirtualization(node.virtualization), node.arch].filter(Boolean).join(" · ") || "待上报";
 }
 function expiryLabel(value, now = Date.now()) {
   if (value === null || value === undefined || value === "" || value === 0) return "∞";
@@ -78,7 +81,7 @@ function recordSpeed(data) {
   while (speedSamples.length > 61 || speedSamples[0].at < data.generated_at - 120) speedSamples.shift();
 }
 function speedTrend() {
-  if (speedSamples.length < 2) return '<span class="trend-empty">等待更多实时采样</span>';
+  if (speedSamples.length < 2) return "";
   const end = speedSamples.at(-1).at, max = Math.max(1, ...speedSamples.flatMap(p => [p.rx, p.tx]));
   const paths = ["rx", "tx"].map((key, index) => {
     let previous = 0;
@@ -106,12 +109,12 @@ function card(node) {
 function detail(node) {
   const m = node.metrics || {};
   const facts = [
-    ["系统", [node.os, node.kernel].filter(Boolean).join(" · ")],
+    ["系统", [shortOs(node.os), node.kernel].filter(Boolean).join(" · ")],
     ["CPU", (node.cpu_name || "—") + " × " + (node.cpu_cores || "—")],
     ["内存 / 硬盘", capacity(node.mem_total) + " / " + capacity(node.disk_total)],
-    ["架构", [node.arch, node.virtualization, (m.processes ?? "—") + " 进程"].filter(Boolean).join(" · ")],
+    ["架构", [node.arch, shortVirtualization(node.virtualization), (m.processes ?? "—") + " 进程"].filter(Boolean).join(" · ")],
     ["今日流量", "↓ " + bytes(node.day_rx) + " · ↑ " + bytes(node.day_tx)],
-    ["本月流量 · UTC", "↓ " + bytes(node.month_rx) + " · ↑ " + bytes(node.month_tx)],
+    ["本月流量", "↓ " + bytes(node.month_rx) + " · ↑ " + bytes(node.month_tx)],
     ["连接", "TCP " + (m.tcp ?? "—") + " · UDP " + (m.udp ?? "—")],
     ["Swap", bytes(m.swap_used) + " / " + bytes(node.swap_total)],
     ["累计流量", "↓ " + bytes(node.total_rx) + " · ↑ " + bytes(node.total_tx)],
@@ -124,8 +127,6 @@ function render() {
   $(".brand > span:last-child").textContent = site.name || "Monitor";
   document.title = (detailId ? (nodes.find(n => n.id === detailId)?.name || "节点") + " · " : "") + (site.name || "Monitor");
   $('meta[name="description"]').content = site.description || "";
-  $("#site-description").textContent = site.description || "";
-  $("#site-description").hidden = !site.description || !!detailId;
   $(".footer").textContent = site.footer || "";
   $(".footer").hidden = !site.footer?.trim();
   if (detailId) {
@@ -149,7 +150,7 @@ function render() {
   $("#live-speed").innerHTML = duplex(isStale() ? null : online.reduce((sum, n) => sum + (n.metrics?.net_rx || 0), 0), isStale() ? null : online.reduce((sum, n) => sum + (n.metrics?.net_tx || 0), 0), rate);
   $("#speed-trend").innerHTML = speedTrend();
   $("#speed-trend").classList.toggle("stale", isStale());
-  if (!nodes.length) { nodesRoot.innerHTML = '<div class="empty-card"><h2>还没有节点</h2><p>在后台添加节点后，执行生成的探针安装命令。</p></div>'; return; }
+  if (!nodes.length) { nodesRoot.innerHTML = '<div class="empty-card"><h2>暂无节点</h2></div>'; return; }
   nodesRoot.querySelector(".empty-card")?.remove();
   const existing = new Map([...nodesRoot.querySelectorAll(".node-card")].map(el => [el.dataset.id, el]));
   for (const node of nodes) {
@@ -182,7 +183,7 @@ function chartReading(point, series) {
   const reading = failure && !Number.isFinite(value) ? failure : series.format(value) + (failure ? " · " + failure : "");
   return series.label + "：" + reading;
 }
-function chart(title, points, series, maximum) {
+function chart(title, points, series, maximum, selectionKey = title) {
   const width = Math.max(280, $("#charts").clientWidth), height = 168, left = width < 500 ? 58 : 72, right = width - 8, top = 10, bottom = 138;
   const max = Math.max(1, maximum || 0, ...points.flatMap(p => series.map(s => Number.isFinite(p[s.key]) ? p[s.key] : 0)));
   const y = value => bottom - Math.min(max, Math.max(0, value)) / max * (bottom - top);
@@ -234,7 +235,7 @@ function chart(title, points, series, maximum) {
       } else dot.setAttribute("hidden", "");
     });
     tooltip.hidden = false;
-    tooltip.textContent = new Date(at * 1000).toLocaleString("zh-CN", {hour12:false}) + "\n" + (point ? series.map(s => chartReading(point, s)).join("\n") : "此时间暂无记录");
+    tooltip.textContent = new Date(at * 1000).toLocaleString("zh-CN", {hour12:false}) + "\n" + (point ? series.map(s => chartReading(point, s)).join("\n") : "暂无数据");
     tooltip.style.left = Math.max(0, Math.min(el.clientWidth - tooltip.offsetWidth, xx / width * svg.clientWidth + 12)) + "px";
   };
   const position = e => {
@@ -243,7 +244,7 @@ function chart(title, points, series, maximum) {
     const index = chartHit(points, at, historyData.step);
     return {index,at:index < 0 ? Math.round(at) : points[index].at};
   };
-  const clear = () => { pinned = false; chartSelections.delete(title); hide(); };
+  const clear = () => { pinned = false; chartSelections.delete(selectionKey); hide(); };
   svg.addEventListener("pointermove", e => {
     if (pinned || e.pointerType === "touch") return;
     const {index,at} = position(e); show(index, at);
@@ -251,7 +252,7 @@ function chart(title, points, series, maximum) {
   svg.addEventListener("click", e => {
     const {index,at} = position(e);
     if (pinned && selected === index && Math.abs(selectedAt - at) < historyData.step / 2) { clear(); return; }
-    pinned = true; chartSelections.set(title, at); show(index, at);
+    pinned = true; chartSelections.set(selectionKey, at); show(index, at);
   });
   svg.addEventListener("pointerleave", () => { if (!pinned) hide(); });
   svg.addEventListener("blur", () => { if (!pinned) hide(); });
@@ -260,9 +261,9 @@ function chart(title, points, series, maximum) {
     if (!["ArrowLeft","ArrowRight","Home","End"].includes(e.key) || !points.length) return;
     e.preventDefault();
     const index = e.key === "Home" ? 0 : e.key === "End" ? points.length - 1 : Math.max(0, Math.min(points.length - 1, selected + (e.key === "ArrowLeft" ? -1 : 1)));
-    pinned = true; chartSelections.set(title, points[index].at); show(index);
+    pinned = true; chartSelections.set(selectionKey, points[index].at); show(index);
   });
-  const saved = chartSelections.get(title);
+  const saved = chartSelections.get(selectionKey);
   if (Number.isFinite(saved) && saved >= historyData.from && saved <= historyData.to) {
     pinned = true;
     // Position after insertion; a detached SVG has no layout width yet.
@@ -274,7 +275,7 @@ function drawHistory() {
   if (!historyData || !detailId) return;
   const root = $("#charts"), points = activeTab === "resources" ? historyData.resources : historyData.latency;
   root.replaceChildren();
-  if (!points?.length) { root.innerHTML = '<p class="chart-empty">此时间范围暂无记录</p>'; return; }
+  if (!points?.length) { root.innerHTML = '<p class="chart-empty">暂无数据</p>'; return; }
   const node = payload?.nodes?.find(n => n.id === detailId);
   if (activeTab === "resources") {
     root.append(chart("CPU", points, [{key:"cpu",label:"CPU",format:pct}]));
@@ -282,22 +283,21 @@ function drawHistory() {
     root.append(chart("网络速率", points, [{key:"net_rx",label:"下载",format:rate},{key:"net_tx",label:"上传",format:rate}]));
     root.append(chart("硬盘 · " + capacity(node?.disk_total), points, [{key:"disk_used",label:"硬盘",format:capacity}], node?.disk_total));
   } else for (const [key, label] of [["telecom","电信"],["unicom","联通"],["mobile","移动"]]) {
-    root.append(chart(label + " · " + (historyData.targets?.[key] || "—"), points, [{key,label,format:v => Number.isFinite(v) ? v.toFixed(1) + " ms" : "失败",failure:key + "_failures"}]));
+    const selectionKey = key + ":" + (historyData.targets?.[key] || "");
+    root.append(chart(label, points, [{key,label,format:v => Number.isFinite(v) ? v.toFixed(1) + " ms" : "失败",failure:key + "_failures"}], undefined, selectionKey));
   }
 }
 async function loadHistory() {
   if (!detailId) return;
   historyRequest?.abort();
   const request = new AbortController(); historyRequest = request;
-  if (!historyData) $("#charts").innerHTML = '<p class="chart-empty">正在读取历史…</p>';
+  if (!historyData) $("#charts").innerHTML = '<p class="chart-empty">加载中…</p>';
   try {
     const response = await fetch("/api/nodes/" + encodeURIComponent(detailId) + "/history?hours=" + hours + "&kind=" + activeTab, {cache:"no-store",signal:request.signal});
     if (!response.ok) throw new Error(response.status === 404 ? "节点不存在或已停用" : "历史读取失败，请稍后重试");
     const data = await response.json();
     if (stopped || request !== historyRequest || request.signal.aborted) return;
     historyData = data;
-    $("#history-note").textContent = activeTab === "latency" ? "每 30 秒检测一轮 · TCP 建连时间 · 红线表示检测失败 · 仅显示当前目标的历史" : "每分钟记录 · 历史保留 30 天";
-    if (data.step > (activeTab === "latency" ? 30 : 60)) $("#history-note").textContent += " · 当前按 " + Math.round(data.step / 60) + " 分钟汇总";
     drawHistory();
   } catch (error) {
     if (stopped || error.name === "AbortError") return;
@@ -361,7 +361,7 @@ function route(pathname) {
   if (next === detailId) return;
   detailId = next; detailCapacity = null; historyData = null; historyRequest?.abort(); chartSelections.clear();
   $("#home-view").hidden = !!detailId; $("#detail-view").hidden = !detailId;
-  $("#charts").replaceChildren(); $("#history-note").textContent = ""; $("#node-detail").replaceChildren();
+  $("#charts").replaceChildren(); $("#node-detail").replaceChildren();
   render(); loadHistory();
 }
 startFallback(); connect(); loadHistory();

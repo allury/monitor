@@ -5,7 +5,11 @@ import vm from 'node:vm';
 
 const source = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8').replace(/^export function mountStatus\(\) \{\r?\n/, '');
 function context(pathname = '/') {
-  const context = vm.createContext({document:{querySelector:() => ({hidden:false})},location:{pathname},AbortController});
+  const elements = new Map();
+  const context = vm.createContext({document:{querySelector:selector => {
+    if (!elements.has(selector)) elements.set(selector, {hidden:false,innerHTML:'',clientWidth:640,classList:{toggle(){}},replaceChildren(){},append(){}});
+    return elements.get(selector);
+  }},location:{pathname},AbortController});
   vm.runInContext(source.slice(0, source.indexOf('for (const button of')), context);
   return context;
 }
@@ -43,6 +47,47 @@ test('live speed trend is bounded, ignores duplicate snapshots and breaks across
   assert.equal(vm.runInContext('speedSamples.length', sandbox), 61);
   vm.runInContext('recordSpeed({generated_at:1220,nodes:[]})', sandbox);
   assert.ok(vm.runInContext('speedTrend()', sandbox).includes('M298.00'));
+});
+test('pending speed samples stay empty without instructions or fabricated readings', () => {
+  const sandbox = context();
+  assert.equal(vm.runInContext('speedTrend()', sandbox), '');
+  vm.runInContext('recordSpeed({generated_at:1000,nodes:[]})', sandbox);
+  assert.equal(vm.runInContext('speedTrend()', sandbox), '');
+});
+test('public templates omit explanatory blocks while retaining navigation and metadata', () => {
+  const template = readFileSync(new URL('../src/ui/index.html', import.meta.url), 'utf8');
+  for (const text of ['history-note','site-description','back-link','等待实时采样','等待节点数据']) assert.ok(!template.includes(text), text);
+  for (const text of ['history-note','每 30 秒检测一轮','TCP 建连时间','历史保留 30 天','当前按 ','添加节点后']) assert.ok(!source.includes(text), text);
+  assert.ok(template.includes('class="brand" href="/"'));
+  assert.ok(template.includes('meta name="description"'));
+  assert.ok(template.includes('id="charts"'));
+});
+test('empty home keeps a concise state, metadata and optional custom footer', () => {
+  const sandbox = context();
+  vm.runInContext('payload={generated_at:Date.now()/1000,nodes:[],site:{name:"Monitor",description:"Custom metadata",footer:"Custom footer"}};receivedAt=Date.now();render()', sandbox);
+  assert.equal(vm.runInContext('document.querySelector("#nodes").innerHTML', sandbox), '<div class="empty-card"><h2>暂无节点</h2></div>');
+  assert.equal(vm.runInContext('document.querySelector(\'meta[name="description"]\').content', sandbox), 'Custom metadata');
+  assert.equal(vm.runInContext('document.querySelector(".footer").textContent', sandbox), 'Custom footer');
+  assert.equal(vm.runInContext('document.querySelector(".footer").hidden', sandbox), false);
+});
+test('details use compact system labels without removing monthly or other metric values', () => {
+  const sandbox = context('/node/n');
+  vm.runInContext('detail({name:"n",os:"Debian GNU/Linux 12 (bookworm)",kernel:"6.1.0",virtualization:"virtualized",arch:"x86_64",metrics:{processes:111,tcp:41,udp:3,swap_used:0},month_rx:1048576,month_tx:2097152,swap_total:0})', sandbox);
+  const html = vm.runInContext('document.querySelector("#node-detail").innerHTML', sandbox);
+  assert.ok(html.includes('Debian 12 · 6.1.0'));
+  assert.ok(html.includes('x86_64 · vm · 111 进程'));
+  assert.ok(html.includes('<dt>本月流量</dt><dd>↓ 1 MiB · ↑ 2 MiB</dd>'));
+  assert.ok(html.includes('TCP 41 · UDP 3'));
+  assert.ok(html.includes('<dt>Swap</dt><dd>0 B / 0 B</dd>'));
+  assert.ok(!html.includes('bookworm') && !html.includes('GNU/Linux') && !html.includes('UTC'));
+});
+test('latency headings stay compact but selections remain scoped to the configured target', () => {
+  const sandbox = context('/node/n');
+  vm.runInContext('const calls=[];chart=(title,points,series,maximum,selectionKey)=>{calls.push({title,selectionKey});return {};};activeTab="latency";historyData={latency:[{at:100}],targets:{telecom:"old.example:80",unicom:"u.example:80",mobile:"m.example:80"}};drawHistory();historyData.targets.telecom="new.example:80";drawHistory()', sandbox);
+  const calls = JSON.parse(vm.runInContext('JSON.stringify(calls)', sandbox));
+  assert.deepEqual(calls.map(call=>call.title), ['电信','联通','移动','电信','联通','移动']);
+  assert.equal(calls[0].selectionKey, 'telecom:old.example:80');
+  assert.equal(calls[3].selectionKey, 'telecom:new.example:80');
 });
 test('chart hit testing does not invent readings inside missing history', () => {
   const sandbox = context();

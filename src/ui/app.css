@@ -72,7 +72,6 @@ main { padding-block:1rem 0; }
 .status.stale { color:var(--warn); }
 .node-subtitle { display:flex; align-items:baseline; justify-content:space-between; gap:.5rem; margin:.35rem 0 1.25rem; color:var(--muted-foreground); font-size:.8125rem; }
 .node-system { min-width:0; overflow:hidden; margin:0; text-overflow:ellipsis; white-space:nowrap; }
-.node-expiry { flex:none; white-space:nowrap; }
 .resource-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1.1rem 1rem; }
 .metric { min-width:0; }
 .metric-label { display:flex; align-items:baseline; justify-content:space-between; gap:.3rem; margin-bottom:.3rem; font-size:.8125rem; color:var(--muted-foreground); }
@@ -105,6 +104,17 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
 .muted { color:var(--muted-foreground); font-size:.8125rem; }
 .chart-block { position:relative; margin:1rem 0 1.8rem; }
 .chart-block h2 { margin:0 0 .35rem; font-size:.8125rem; color:var(--muted-foreground); font-weight:400; overflow-wrap:anywhere; }
+.chart-heading { display:flex; align-items:center; gap:.35rem; margin-bottom:.35rem; }
+.chart-heading h2 { margin:0; }
+.latency-stats { position:relative; color:var(--muted-foreground); font-size:.75rem; }
+.latency-stats summary { display:flex; align-items:center; justify-content:center; width:1.5rem; height:1.5rem; cursor:pointer; list-style:none; border-radius:.25rem; }
+.latency-stats summary::-webkit-details-marker { display:none; }
+.latency-stats summary span { display:flex; align-items:center; justify-content:center; width:.8rem; height:.8rem; border:1px solid currentColor; border-radius:50%; font:600 .625rem/1 serif; }
+.latency-stats summary:hover,.latency-stats[open] summary { color:var(--foreground); background:var(--muted); }
+.latency-stat-panel { position:absolute; z-index:3; top:100%; left:0; min-width:9rem; margin:.25rem 0 0; padding:.6rem .75rem; background:var(--card); color:var(--foreground); border:1px solid var(--border); border-radius:.4rem; box-shadow:var(--shadow); }
+.latency-stat-panel div { display:flex; justify-content:space-between; gap:1rem; line-height:1.8; white-space:nowrap; }
+.latency-stat-panel dt { color:var(--muted-foreground); }
+.latency-stat-panel dd { margin:0; font-variant-numeric:tabular-nums; }
 .chart-legend { display:flex; flex-wrap:wrap; gap:1rem; margin-bottom:.4rem; font-size:.8125rem; color:var(--muted-foreground); }
 .chart-legend span::before { content:""; display:inline-block; width:1rem; margin-right:.3rem; border-top:2px solid var(--foreground); vertical-align:middle; }
 .chart-legend .secondary::before { border-top-style:dashed; }
@@ -115,7 +125,6 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
 .chart .line { fill:none; stroke:var(--foreground); stroke-width:1.4; vector-effect:non-scaling-stroke; }
 .chart .line.secondary { stroke-dasharray:5 3; opacity:.65; }
 .chart .area { fill:var(--foreground); opacity:.09; }
-.chart .failure { stroke:var(--danger); stroke-width:2; }
 .chart-cursor { pointer-events:none; }
 .cursor-line { stroke:var(--muted-foreground); stroke-width:1; vector-effect:non-scaling-stroke; opacity:.6; }
 .cursor-dot { fill:var(--foreground); stroke:var(--card); stroke-width:2; vector-effect:non-scaling-stroke; }
@@ -161,6 +170,7 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
 .inline-status::before { content: ""; width: 0.4rem; height: 0.4rem; border-radius: 50%; background: var(--danger); }
 .inline-status.online::before { background: var(--ok); }
 .settings-form { max-width: 38rem; }
+.settings-form + .settings-form { margin-top: 1.25rem; }
 .form-actions { display: flex; align-items: center; gap: 0.65rem; margin-top: 1rem; }
 .save-status { color: var(--muted-foreground); font-size: 0.74rem; }
 .token-box { display: none; margin-top: 0.9rem; padding: 0.8rem; border: 1px solid color-mix(in oklab, var(--warn) 38%, var(--border)); border-radius: 0.55rem; background: color-mix(in oklab, var(--warn) 7%, var(--card)); }

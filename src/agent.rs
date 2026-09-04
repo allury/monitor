@@ -47,8 +47,9 @@ mod linux {
 
     use super::AgentOptions;
     use crate::model::{
-        network_delta, valid_target, AgentReport, Latency, LatencySample, LatencyTargets, Metrics,
-        NetworkCounter, ServerMessage, PROTOCOL_VERSION,
+        network_delta, valid_latency_interval, valid_target, AgentReport, Latency, LatencySample,
+        LatencyTargets, Metrics, NetworkCounter, ServerMessage, DEFAULT_LATENCY_INTERVAL_SECS,
+        PROTOCOL_VERSION,
     };
 
     const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -86,6 +87,7 @@ mod linux {
             telecom: options.telecom.clone(),
             unicom: options.unicom.clone(),
             mobile: options.mobile.clone(),
+            interval_seconds: DEFAULT_LATENCY_INTERVAL_SECS,
         };
         if !valid_targets(&initial_targets) {
             bail!("延迟地址必须为 host:port 或 [IPv6]:port");
@@ -197,7 +199,7 @@ mod linux {
         mut config: watch::Receiver<Option<(LatencyTargets, u64)>>,
         samples: watch::Sender<Option<LatencySample>>,
     ) {
-        let mut ticker = interval(Duration::from_secs(30));
+        let mut ticker = interval(Duration::from_secs(DEFAULT_LATENCY_INTERVAL_SECS));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -210,6 +212,11 @@ mod linux {
             let Some((targets, revision)) = config.borrow_and_update().clone() else {
                 continue;
             };
+            let period = Duration::from_secs(targets.interval_seconds);
+            if ticker.period() != period {
+                ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            }
             let values = tokio::select! {
                 values = measure_latency(&targets) => values,
                 changed = config.changed() => {
@@ -226,6 +233,7 @@ mod linux {
             samples.send_replace(Some(LatencySample {
                 id,
                 revision,
+                interval_seconds: Some(targets.interval_seconds),
                 values,
             }));
         }
@@ -583,6 +591,10 @@ mod linux {
     }
 
     async fn tcp_latency(address: &str) -> Option<f32> {
+        crate::latency::measure_tcp(|| tcp_latency_once(address)).await
+    }
+
+    async fn tcp_latency_once(address: &str) -> Option<f32> {
         // Resolve separately so the displayed TCP latency does not include DNS time.
         let destination = timeout(Duration::from_secs(3), lookup_host(address))
             .await
@@ -591,15 +603,16 @@ mod linux {
             .next()?;
         let started = Instant::now();
         match timeout(Duration::from_secs(3), TcpStream::connect(destination)).await {
-            Ok(Ok(_)) => Some(started.elapsed().as_secs_f32() * 1000.0),
+            Ok(Ok(_)) => Some(started.elapsed().as_millis() as f32),
             _ => None,
         }
     }
 
     fn valid_targets(targets: &LatencyTargets) -> bool {
-        [&targets.telecom, &targets.unicom, &targets.mobile]
-            .into_iter()
-            .all(|target| valid_target(target))
+        valid_latency_interval(targets.interval_seconds)
+            && [&targets.telecom, &targets.unicom, &targets.mobile]
+                .into_iter()
+                .all(|target| valid_target(target))
     }
 
     fn read_text(path: &str) -> String {

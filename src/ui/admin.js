@@ -125,6 +125,8 @@ function showLogin() {
   adminView.classList.add("hidden");
   logoutButton.classList.add("hidden");
   document.querySelector("#node-dialog").close(); clearCommands(); currentState = null;
+  clearPasswordFields();
+  document.querySelector("#password").value = "";
 }
 
 function showAdmin() {
@@ -158,11 +160,12 @@ function renderNodes(nodes) {
 function renderState(state) {
   currentState = state;
   renderNodes(state.nodes || []);
-  document.querySelector("#agent-upgrade-note").hidden = !(state.nodes || []).some(node => node.agent_version?.startsWith("0.1."));
+  document.querySelector("#agent-upgrade-note").hidden = !(state.nodes || []).some(node => node.agent_version && !Number.isInteger(node.metrics?.latency_sample?.interval_seconds));
   const latency = state.settings.latency;
   document.querySelector("#latency-telecom").value = latency.telecom;
   document.querySelector("#latency-unicom").value = latency.unicom;
   document.querySelector("#latency-mobile").value = latency.mobile;
+  document.querySelector("#latency-interval").value = latency.interval_seconds ?? 30;
   const site = state.settings.site;
   document.querySelector("#site-name").value = site.name;
   document.querySelector("#site-description").value = site.description;
@@ -181,21 +184,74 @@ async function loadState() {
   }
 }
 
+function latencyFormValues() {
+  const interval_seconds = Number(document.querySelector("#latency-interval").value);
+  if (!Number.isInteger(interval_seconds) || interval_seconds < 10 || interval_seconds > 3600) throw new Error("检测间隔必须为 10–3600 秒");
+  return {
+    telecom: document.querySelector("#latency-telecom").value.trim(),
+    unicom: document.querySelector("#latency-unicom").value.trim(),
+    mobile: document.querySelector("#latency-mobile").value.trim(),
+    interval_seconds,
+  };
+}
+
+function clearPasswordFields() {
+  for (const id of ["current-password", "new-password", "confirm-password"]) document.querySelector(`#${id}`).value = "";
+}
+
+function passwordFormValues() {
+  const current_password = document.querySelector("#current-password").value;
+  const new_password = document.querySelector("#new-password").value;
+  const confirm_password = document.querySelector("#confirm-password").value;
+  const length = Array.from(new_password).length;
+  if (length < 15 || length > 128) throw new Error("新密码需为 15–128 个字符");
+  if (new_password !== confirm_password) throw new Error("两次新密码不一致");
+  if (new_password === current_password) throw new Error("新密码不能与当前密码相同");
+  return {current_password, new_password, confirm_password};
+}
+
 document.querySelector("#login-form").addEventListener("submit", async event => {
   event.preventDefault();
+  const button = event.currentTarget.querySelector('[type="submit"]');
+  const input = document.querySelector("#password");
+  if (button.disabled) return;
+  button.disabled = true;
   const error = document.querySelector("#login-error");
   error.textContent = "";
   try {
     const result = await api("/login", {
       method: "POST",
-      body: JSON.stringify({password: document.querySelector("#password").value}),
+      body: JSON.stringify({password: input.value}),
     });
     session = result.token;
     sessionStorage.setItem("monitor-admin-session", session);
-    document.querySelector("#password").value = "";
+    input.value = "";
     await loadState();
   } catch (reason) {
-    error.textContent = reason.message;
+    if (alive) error.textContent = reason.message;
+  } finally {
+    input.value = "";
+    button.disabled = false;
+  }
+});
+
+document.querySelector("#password-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('[type="submit"]');
+  if (button.disabled) return;
+  const status = document.querySelector("#password-status");
+  button.disabled = true;
+  status.textContent = "";
+  try {
+    await api("/password", {method:"PUT", body:JSON.stringify(passwordFormValues())});
+    showLogin();
+    document.querySelector("#login-error").textContent = "密码已修改，请重新登录";
+    document.querySelector("#password").focus();
+  } catch (error) {
+    if (alive) status.textContent = error.message;
+  } finally {
+    if (alive) clearPasswordFields();
+    button.disabled = false;
   }
 });
 
@@ -275,11 +331,7 @@ document.querySelector("#latency-form").addEventListener("submit", async event =
   try {
     await api("/latency", {
       method: "PUT",
-      body: JSON.stringify({
-        telecom: document.querySelector("#latency-telecom").value.trim(),
-        unicom: document.querySelector("#latency-unicom").value.trim(),
-        mobile: document.querySelector("#latency-mobile").value.trim(),
-      }),
+      body: JSON.stringify(latencyFormValues()),
     });
     status.textContent = "已保存并下发";
   } catch (error) { status.textContent = error.message; }
@@ -306,6 +358,7 @@ document.querySelector("#site-form").addEventListener("submit", async event => {
 
 if (session) loadState(); else showLogin();
 return {kind:"admin", dispose() {
-  clearCommands(); alive = false; lifetime.abort(); clearTimeout(toastTimer); currentState = null; session = "";
+  clearCommands(); clearPasswordFields(); document.querySelector("#password").value = "";
+  alive = false; lifetime.abort(); clearTimeout(toastTimer); currentState = null; session = "";
 }};
 }

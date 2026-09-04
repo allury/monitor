@@ -4,4 +4,4 @@
 /*.db-wal
 /.idea
 /.vscode
-
+__pycache__/

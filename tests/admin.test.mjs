@@ -53,3 +53,33 @@ test('hash-only nodes keep update controls while fresh credentials are cleared o
   assert.equal(element('#node-token').value,'');
   assert.equal(element('#node-install-command').textContent,'');
 });
+
+test('latency settings preserve legacy 30-second defaults and bound custom intervals', () => {
+  const {sandbox,element} = context();
+  vm.runInContext('renderState({nodes:[],settings:{latency:{telecom:"t.example:80",unicom:"u.example:80",mobile:"m.example:80"},site:{name:"Monitor"}}})',sandbox);
+  assert.equal(element('#latency-interval').value,30);
+  element('#latency-interval').value = '60';
+  assert.equal(vm.runInContext('latencyFormValues().interval_seconds',sandbox),60);
+  for (const value of ['', '0', '9', '10.5', '3601', 'no']) {
+    element('#latency-interval').value = value;
+    assert.throws(() => vm.runInContext('latencyFormValues()',sandbox), /10–3600/);
+  }
+});
+
+test('password form checks Unicode length and confirmation without trimming secrets', () => {
+  const {sandbox,element} = context();
+  element('#current-password').value = 'old credential';
+  element('#new-password').value = '  long new pass phrase  ';
+  element('#confirm-password').value = element('#new-password').value;
+  assert.equal(vm.runInContext('passwordFormValues().new_password',sandbox),'  long new pass phrase  ');
+  for (const value of ['short','x'.repeat(129)]) {
+    element('#new-password').value = value;
+    assert.throws(() => vm.runInContext('passwordFormValues()',sandbox), /15–128/);
+  }
+  element('#new-password').value = '字'.repeat(15);
+  assert.throws(() => vm.runInContext('passwordFormValues()',sandbox), /不一致/);
+  element('#confirm-password').value = element('#new-password').value;
+  assert.equal(vm.runInContext('passwordFormValues().new_password.length',sandbox),15);
+  vm.runInContext('showLogin()',sandbox);
+  for (const id of ['current-password','new-password','confirm-password','password']) assert.equal(element('#'+id).value,'');
+});

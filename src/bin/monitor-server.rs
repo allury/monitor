@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 use std::env;
+use std::fs::{File, OpenOptions};
+use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -11,7 +13,7 @@ const HELP: &str = r#"monitor-server — 极简监控主控
 
 用法：
   monitor-server [--listen 127.0.0.1:34331] [--db monitor.db]
-  monitor-server admin reset [--db monitor.db]
+  monitor-server admin init|reset [--db monitor.db]
   monitor-server node create --id <ID> --name <名称> [--db monitor.db]
   monitor-server node revoke --id <ID> [--db monitor.db]
   monitor-server node list [--db monitor.db]
@@ -58,18 +60,34 @@ async fn run() -> Result<()> {
 }
 
 fn admin_command(mut arguments: VecDeque<String>) -> Result<()> {
-    let action = arguments.pop_front().context("admin 后需要 reset")?;
+    let action = arguments
+        .pop_front()
+        .context("admin 后需要 init 或 reset")?;
     let database =
         PathBuf::from(option(&mut arguments, "--db").unwrap_or_else(|| "monitor.db".to_owned()));
     ensure_empty(arguments)?;
     match action.as_str() {
+        "init" => {
+            let connection = db::open(&database)?;
+            if db::admin_initialized(&connection)? {
+                db::admin_hash(&connection)?;
+                println!("管理员已初始化，保留原密钥。");
+                return Ok(());
+            }
+            let mut terminal = secret_terminal()?;
+            if let Some(password) = db::ensure_admin(&connection)? {
+                deliver_secret(&mut terminal, "管理员密钥（仅显示一次）", &password)?;
+            }
+            Ok(())
+        }
         "reset" => {
+            let mut terminal = secret_terminal()?;
             let password = db::reset_admin(&database)?;
-            println!("新管理员密钥（仅显示这一次）：{password}");
+            deliver_secret(&mut terminal, "新管理员密钥（仅显示这一次）", &password)?;
             println!("已有网页会话会在主控下次重启时全部失效。");
             Ok(())
         }
-        other => bail!("未知 admin 命令 {other:?}；可用命令：reset"),
+        other => bail!("未知 admin 命令 {other:?}；可用命令：init、reset"),
     }
 }
 
@@ -95,9 +113,10 @@ fn node_command(mut arguments: VecDeque<String>) -> Result<()> {
             let id = required(&mut arguments, "--id")?;
             let name = required(&mut arguments, "--name")?;
             ensure_empty(arguments)?;
+            let mut terminal = secret_terminal()?;
             let token = db::create_node(&database, &id, &name)?;
             println!("节点已创建：{name} ({id})");
-            println!("节点密钥（仅显示一次）：{token}");
+            deliver_secret(&mut terminal, "节点密钥（仅显示一次）", &token)?;
             println!("如果主控正在运行，请重启主控以载入新节点。");
         }
         "revoke" => {
@@ -128,6 +147,24 @@ fn node_command(mut arguments: VecDeque<String>) -> Result<()> {
         other => bail!("未知 node 命令 {other:?}；可用命令：create、revoke、list"),
     }
     Ok(())
+}
+
+fn secret_terminal() -> Result<File> {
+    // A controlling terminal is a separate delivery channel, never stdout/stderr.
+    // Validate it before generating or replacing any credential.
+    let terminal = OpenOptions::new()
+        .write(true)
+        .open("/dev/tty")
+        .context("密钥操作需要交互终端；未生成或重置密钥")?;
+    if !terminal.is_terminal() {
+        bail!("密钥交付目标不是终端；未生成或重置密钥");
+    }
+    Ok(terminal)
+}
+
+fn deliver_secret(terminal: &mut File, label: &str, secret: &str) -> Result<()> {
+    writeln!(terminal, "{label}：{secret}").context("无法向交互终端交付密钥")?;
+    terminal.flush().context("无法刷新交互终端")
 }
 
 fn option(arguments: &mut VecDeque<String>, name: &str) -> Option<String> {

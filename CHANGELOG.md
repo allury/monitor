@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0 - 2026-09-04
+
+### Added
+
+- Shared TCP sampling interval in administrator latency settings (10–3600 seconds, default 30), applied live by compatible agents.
+- Administrator password changes with current-password verification, confirmation and immediate session revocation.
+- Salted Argon2id password storage with legacy credential compatibility and bounded authentication attempts.
+
+### Changed
+
+- Matched Komari's bounded TCP high-latency recheck rules; failures remain stored and appear as chart gaps with optional aggregate statistics.
+- Replaced unsupported expiry symbols with embedded operating-system marks, preserving monthly traffic markup.
+- Aligned SQLite writer settings with Komari's main-database baseline: 8 MiB cache, 256-page checkpoint, 1 MiB retained WAL target, file-backed temporary storage and disabled mmap. Kept bounded history readers.
+
+### Fixed
+
+- Removed administrator credentials from startup/reset logs and addressed the same output path in CLI node creation.
+- Added idempotent, terminal-only credential initialization; noninteractive credential generation/reset fails without changing a credential.
+- Preserved node credentials, existing latency history and target revision when changing the sampling interval.
+
+### Upgrade notes
+
+- Update the controller first, then manually update agents to enable the new sampling policy and interval setting. Older agents retain their existing cadence.
+- Existing administrator and node credentials remain valid. New installations and CLI password resets require an interactive terminal.
+
 ## 0.3.1 - 2026-09-04
 
 ### Changed

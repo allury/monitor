@@ -66,12 +66,10 @@ const shortVirtualization = value => value === "virtualized" ? "vm" : value;
 function systemLabel(node) {
   return [shortOs(node.os), shortVirtualization(node.virtualization), node.arch].filter(Boolean).join(" · ") || "待上报";
 }
-function expiryLabel(value, now = Date.now()) {
-  if (value === null || value === undefined || value === "" || value === 0) return "∞";
-  const timestamp = typeof value === "number" ? value * 1000 : Date.parse(value);
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return "∞";
-  const days = Math.ceil((timestamp - now) / 86400000);
-  return days < 0 ? "已到期" : days === 0 ? "今日到期" : days + " 天后到期";
+function osMark(value) {
+  const os = String(value || "").toLowerCase();
+  const [key, label] = os.includes("debian") ? ["debian", "Debian"] : os.includes("ubuntu") ? ["ubuntu", "Ubuntu"] : os.includes("alpine") ? ["alpinelinux", "Alpine Linux"] : ["linux", "Linux"];
+  return '<span class="os-mark os-' + key + '" role="img" aria-label="' + label + '" title="' + label + '"></span>';
 }
 function recordSpeed(data) {
   if (speedSamples.length && data.generated_at <= speedSamples.at(-1).at) return;
@@ -100,7 +98,7 @@ function metric(label, value, sub, digits = 1) {
 }
 function card(node) {
   const m = node.metrics || {}, online = isOnline(node);
-  return '<div class="node-title-row"><h2>' + escapeHtml(node.name) + "</h2>" + status(node) + '</div><div class="node-subtitle"><p class="node-system" title="' + escapeHtml([node.os, node.virtualization, node.arch].filter(Boolean).join(" · ")) + '">' + escapeHtml(systemLabel(node)) + '</p><span class="node-expiry" title="' + (node.expires_at ? "到期时间" : "未设置到期时间") + '">' + expiryLabel(node.expires_at) + '</span></div><div class="resource-grid">' +
+  return '<div class="node-title-row"><h2>' + escapeHtml(node.name) + "</h2>" + status(node) + '</div><div class="node-subtitle"><p class="node-system" title="' + escapeHtml([node.os, node.virtualization, node.arch].filter(Boolean).join(" · ")) + '">' + escapeHtml(systemLabel(node)) + '</p>' + osMark(node.os) + '</div><div class="resource-grid">' +
     metric("CPU " + (node.cpu_cores || "—") + " 核", m.cpu, m.load?.map(n => n.toFixed(2)).join(" ") || "—") +
     metric("内存", ratio(m.mem_used, node.mem_total), capacity(m.mem_used) + " / " + capacity(node.mem_total), 0) +
     metric("硬盘", ratio(m.disk_used, node.disk_total), capacity(m.disk_used) + " / " + capacity(node.disk_total), 0) +
@@ -177,15 +175,23 @@ function chartHit(points, at, step) {
   const index = nearestPoint(points, at);
   return index >= 0 && Math.abs(points[index].at - at) <= step * .75 ? index : -1;
 }
+function chartValue(point, series) {
+  const value = point?.[series.key];
+  return Number.isFinite(value) && (!series.failure || value >= 0) ? value : null;
+}
 function chartReading(point, series) {
-  const value = point[series.key];
-  const failure = series.failure && point[series.failure] > 0 ? "失败 " + point[series.failure] + "/" + point.count : "";
-  const reading = failure && !Number.isFinite(value) ? failure : series.format(value) + (failure ? " · " + failure : "");
-  return series.label + "：" + reading;
+  const value = chartValue(point, series);
+  return series.failure && value === null ? null : series.label + "：" + series.format(value);
+}
+function latencyStats(points, series) {
+  const total = points.reduce((sum, point) => sum + Math.max(0, Number(point.count) || 0), 0);
+  const failed = points.reduce((sum, point) => sum + Math.min(Math.max(0, Number(point.count) || 0), Math.max(0, Number(point[series.failure]) || 0)), 0);
+  const loss = total ? (failed / total * 100).toFixed(1) + "%" : "—";
+  return '<details class="latency-stats"><summary aria-label="' + escapeHtml(series.label + "检测统计") + '"><span aria-hidden="true">i</span></summary><dl class="latency-stat-panel"><div><dt>失败率</dt><dd>' + loss + '</dd></div><div><dt>检测次数</dt><dd>' + total + '</dd></div><div><dt>成功次数</dt><dd>' + (total - failed) + '</dd></div></dl></details>';
 }
 function chart(title, points, series, maximum, selectionKey = title) {
   const width = Math.max(280, $("#charts").clientWidth), height = 168, left = width < 500 ? 58 : 72, right = width - 8, top = 10, bottom = 138;
-  const max = Math.max(1, maximum || 0, ...points.flatMap(p => series.map(s => Number.isFinite(p[s.key]) ? p[s.key] : 0)));
+  const max = Math.max(1, maximum || 0, ...points.flatMap(p => series.map(s => chartValue(p, s) ?? 0)));
   const y = value => bottom - Math.min(max, Math.max(0, value)) / max * (bottom - top);
   const x = at => left + (at - historyData.from) / Math.max(1, historyData.to - historyData.from) * (right - left);
   let body = "";
@@ -202,8 +208,9 @@ function chart(title, points, series, maximum, selectionKey = title) {
   series.forEach((s, seriesIndex) => {
     let segments = [], segment = [], prev = 0;
     for (const point of points) {
-      if (point.at - prev > historyData.step * 1.6 || !Number.isFinite(point[s.key])) { if (segment.length) segments.push(segment); segment = []; }
-      if (Number.isFinite(point[s.key])) segment.push([x(point.at), y(point[s.key])]);
+      const value = chartValue(point, s);
+      if (point.at - prev > historyData.step * 1.6 || value === null) { if (segment.length) segments.push(segment); segment = []; }
+      if (value !== null) segment.push([x(point.at), y(value)]);
       prev = point.at;
     }
     if (segment.length) segments.push(segment);
@@ -213,12 +220,11 @@ function chart(title, points, series, maximum, selectionKey = title) {
       body += '<path class="line ' + (seriesIndex ? "secondary" : "") + '" d="' + path + '"/>';
       if (seg.length === 1) body += '<circle cx="' + seg[0][0] + '" cy="' + seg[0][1] + '" r="2" fill="currentColor"/>';
     }
-    if (s.failure) for (const p of points) if (p[s.failure] > 0) body += '<line class="failure" x1="' + x(p.at) + '" x2="' + x(p.at) + '" y1="' + (bottom - 5) + '" y2="' + bottom + '"/>';
   });
   const el = document.createElement("section");
   el.className = "chart-block";
   const guide = '<g class="chart-cursor" hidden><line class="cursor-line" y1="' + top + '" y2="' + bottom + '"/>' + series.map(() => '<circle class="cursor-dot" r="3.5"/>').join("") + '</g>';
-  el.innerHTML = "<h2>" + escapeHtml(title) + "</h2>" + (series.length > 1 ? '<div class="chart-legend">' + series.map((s, i) => '<span class="' + (i ? "secondary" : "") + '">' + s.label + "</span>").join("") + "</div>" : "") + '<svg class="chart" viewBox="0 0 ' + width + " " + height + '" role="img" tabindex="0" aria-label="' + escapeHtml(title + "，点击固定读数，左右方向键选择，Escape 取消") + '">' + body + guide + '</svg><div class="chart-tooltip" hidden></div>';
+  el.innerHTML = '<div class="chart-heading"><h2>' + escapeHtml(title) + "</h2>" + (series[0].failure ? latencyStats(points, series[0]) : "") + "</div>" + (series.length > 1 ? '<div class="chart-legend">' + series.map((s, i) => '<span class="' + (i ? "secondary" : "") + '">' + escapeHtml(s.label) + "</span>").join("") + "</div>" : "") + '<svg class="chart" viewBox="0 0 ' + width + " " + height + '" role="img" tabindex="0" aria-label="' + escapeHtml(title + "，点击固定读数，左右方向键选择，Escape 取消") + '">' + body + guide + '</svg><div class="chart-tooltip" hidden></div>';
   const svg = el.querySelector("svg"), tooltip = el.querySelector(".chart-tooltip"), cursor = el.querySelector(".chart-cursor"), cursorLine = el.querySelector(".cursor-line"), dots = el.querySelectorAll(".cursor-dot");
   let selected = 0, pinned = false, selectedAt = null;
   const hide = () => { tooltip.hidden = true; cursor.setAttribute("hidden", ""); };
@@ -226,17 +232,20 @@ function chart(title, points, series, maximum, selectionKey = title) {
     if (!Number.isFinite(at)) return;
     selected = index; selectedAt = at;
     const point = points[index], xx = x(at);
+    const readings = point ? series.map(s => chartReading(point, s)).filter(Boolean) : [];
+    if (series.every(s => s.failure) && !readings.length) { hide(); return false; }
     cursor.removeAttribute("hidden");
     cursorLine.setAttribute("x1", xx); cursorLine.setAttribute("x2", xx);
     dots.forEach((dot, i) => {
-      const value = point?.[series[i].key];
-      if (Number.isFinite(value)) {
+      const value = chartValue(point, series[i]);
+      if (value !== null) {
         dot.removeAttribute("hidden"); dot.setAttribute("cx", xx); dot.setAttribute("cy", y(value));
       } else dot.setAttribute("hidden", "");
     });
     tooltip.hidden = false;
-    tooltip.textContent = new Date(at * 1000).toLocaleString("zh-CN", {hour12:false}) + "\n" + (point ? series.map(s => chartReading(point, s)).join("\n") : "暂无数据");
+    tooltip.textContent = new Date(at * 1000).toLocaleString("zh-CN", {hour12:false}) + "\n" + (readings.length ? readings.join("\n") : "暂无数据");
     tooltip.style.left = Math.max(0, Math.min(el.clientWidth - tooltip.offsetWidth, xx / width * svg.clientWidth + 12)) + "px";
+    return true;
   };
   const position = e => {
     const rect = svg.getBoundingClientRect(), px = (e.clientX - rect.left) * width / rect.width;
@@ -252,7 +261,7 @@ function chart(title, points, series, maximum, selectionKey = title) {
   svg.addEventListener("click", e => {
     const {index,at} = position(e);
     if (pinned && selected === index && Math.abs(selectedAt - at) < historyData.step / 2) { clear(); return; }
-    pinned = true; chartSelections.set(selectionKey, at); show(index, at);
+    if (show(index, at)) { pinned = true; chartSelections.set(selectionKey, at); } else clear();
   });
   svg.addEventListener("pointerleave", () => { if (!pinned) hide(); });
   svg.addEventListener("blur", () => { if (!pinned) hide(); });
@@ -261,13 +270,13 @@ function chart(title, points, series, maximum, selectionKey = title) {
     if (!["ArrowLeft","ArrowRight","Home","End"].includes(e.key) || !points.length) return;
     e.preventDefault();
     const index = e.key === "Home" ? 0 : e.key === "End" ? points.length - 1 : Math.max(0, Math.min(points.length - 1, selected + (e.key === "ArrowLeft" ? -1 : 1)));
-    pinned = true; chartSelections.set(selectionKey, points[index].at); show(index);
+    if (show(index)) { pinned = true; chartSelections.set(selectionKey, points[index].at); } else clear();
   });
   const saved = chartSelections.get(selectionKey);
   if (Number.isFinite(saved) && saved >= historyData.from && saved <= historyData.to) {
     pinned = true;
     // Position after insertion; a detached SVG has no layout width yet.
-    requestAnimationFrame(() => { if (el.isConnected) show(chartHit(points, saved, historyData.step), saved); });
+    requestAnimationFrame(() => { if (el.isConnected && !show(chartHit(points, saved, historyData.step), saved)) clear(); });
   }
   return el;
 }
@@ -284,7 +293,7 @@ function drawHistory() {
     root.append(chart("硬盘 · " + capacity(node?.disk_total), points, [{key:"disk_used",label:"硬盘",format:capacity}], node?.disk_total));
   } else for (const [key, label] of [["telecom","电信"],["unicom","联通"],["mobile","移动"]]) {
     const selectionKey = key + ":" + (historyData.targets?.[key] || "");
-    root.append(chart(label, points, [{key,label,format:v => Number.isFinite(v) ? v.toFixed(1) + " ms" : "失败",failure:key + "_failures"}], undefined, selectionKey));
+    root.append(chart(label, points, [{key,label,format:v => Number.isFinite(v) ? v.toFixed(1) + " ms" : "—",failure:key + "_failures"}], undefined, selectionKey));
   }
 }
 async function loadHistory() {

@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import net from 'node:net';
 import {randomBytes} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 
 const [serverBinary, agentBinary] = process.argv.slice(2).map(value => resolve(value));
 assert.ok(serverBinary && agentBinary, 'Provide the server and agent binaries');
@@ -50,7 +51,7 @@ async function startAgent(token, target) {
   const properties = unit.split(/\r?\n/).filter(line => /^(DynamicUser|NoNewPrivileges|Protect\w*|Private\w*|ReadOnlyPaths|InaccessiblePaths|SystemCallFilter|Restrict\w*|LockPersonality|MemoryDenyWriteExecute|CapabilityBoundingSet|SystemCallArchitectures|UMask)=/.test(line));
   sandboxStarted = true;
   return spawn('sudo', ['systemd-run','--quiet','--wait','--pipe','--collect','--unit=' + sandboxUnit,
-    ...properties.map(value => '--property=' + value), '--property=RuntimeMaxSec=100',
+    ...properties.map(value => '--property=' + value), '--property=RuntimeMaxSec=150',
     '--property=LoadCredential=token:' + credential,
     '/bin/sh', '-c', 'export MONITOR_TOKEN_FILE="$CREDENTIALS_DIRECTORY/token"; exec "$@"',
     'monitor-sandbox', sandboxBinary, ...arguments_], {stdio:['ignore','pipe','pipe']});
@@ -61,6 +62,17 @@ async function api(path, body, method = body ? 'POST' : 'GET') {
   return {status:response.status, value};
 }
 async function nodes() { return (await api('/api/nodes')).value.nodes; }
+async function startServer() {
+  server = spawn(serverBinary, ['--listen','127.0.0.1:' + serverPort,'--db',database], {stdio:['ignore','pipe','pipe']});
+  server.stdout.on('data', chunk => serverOutput += chunk.toString());
+  server.stderr.on('data', chunk => serverOutput += chunk.toString());
+  await until(async () => { try { return (await fetch(base + '/api/health')).ok; } catch { return false; } }, 'Controller did not start');
+}
+async function stopServer() {
+  const exited = new Promise(r => server.once('exit', r));
+  server.kill('SIGTERM');
+  assert.equal(await Promise.race([exited, wait(10000).then(() => 'timeout')]), 0, 'Controller did not drain and stop cleanly');
+}
 function ws(token) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(serverPort, '127.0.0.1');
@@ -101,10 +113,9 @@ function ws(token) {
   });
 }
 try {
-  server = spawn(serverBinary, ['--listen','127.0.0.1:' + serverPort,'--db',database], {stdio:['ignore','pipe','pipe']});
-  server.stdout.on('data', chunk => serverOutput += chunk.toString());
-  await until(() => serverOutput.includes('管理员密钥（仅显示一次）：'), 'Controller did not initialize');
-  const password = serverOutput.match(/管理员密钥（仅显示一次）：(\S+)/)[1];
+  execFileSync('python3', [fileURLToPath(new URL('./credentials.py', import.meta.url)), serverBinary, directory], {stdio:'inherit'});
+  const password = await readFile(join(directory, 'admin-test.token'), 'utf8');
+  await startServer();
   const login = await api('/api/admin/login', {password});
   assert.equal(login.status, 200); session = login.value.token; serverOutput = '';
   const created = await api('/api/admin/nodes', {id:'test',name:'测试节点'});
@@ -118,10 +129,8 @@ try {
   assert.ok(!JSON.stringify(detail.value).includes('token_hash'));
   assert.equal((await api('/api/admin/nodes/missing')).status, 404);
   // A controller restart/upgrade must retain the existing administrator and node credentials.
-  const restarted = new Promise(r => server.once('exit', r));
-  server.kill('SIGTERM'); assert.equal(await restarted, 0);
-  server = spawn(serverBinary, ['--listen','127.0.0.1:' + serverPort,'--db',database], {stdio:['ignore','pipe','pipe']});
-  await until(async () => { try { return (await fetch(base + '/api/health')).ok; } catch { return false; } }, 'Controller did not restart');
+  await stopServer();
+  await startServer();
   assert.equal((await api('/api/admin/nodes/test')).status, 401, 'Restarted controller must reject old sessions');
   const relogin = await api('/api/admin/login', {password});
   assert.equal(relogin.status, 200); session = relogin.value.token;
@@ -147,6 +156,16 @@ try {
   assert.equal(latency.status, 200);
   assert.ok(latency.value.latency.length >= 3 && latency.value.latency.length <= 4, 'Each new latency round must be stored exactly once');
   assert.ok(latency.value.latency.every(p => p.count === 1 && p.telecom !== null));
+  const changed = await api('/api/admin/latency', {telecom:target,unicom:target,mobile:target,interval_seconds:10}, 'PUT');
+  assert.equal(changed.status,200);
+  await until(async () => (await nodes())[0]?.metrics?.latency_sample?.interval_seconds === 10, 'Custom interval was not applied live');
+  const firstCustom = (await nodes())[0].metrics.latency_sample.id;
+  const beforeConnections = connections;
+  await until(async () => (await nodes())[0]?.metrics?.latency_sample?.id !== firstCustom, 'Custom cadence did not produce another round',15000);
+  assert.equal(connections - beforeConnections,3,'Each custom interval must sample the three targets once');
+  assert.ok((await api('/api/nodes/test/history?kind=latency&hours=1')).value.latency.length >= latency.value.latency.length,'Changing interval hid earlier history');
+  for (const interval_seconds of [0,9,3601]) assert.equal((await api('/api/admin/latency',{telecom:target,unicom:target,mobile:target,interval_seconds},'PUT')).status,400);
+  assert.equal((await api('/api/admin/latency',{telecom:target,unicom:target,mobile:target},'PUT')).value.interval_seconds,10,'Legacy client must not reset the interval');
   assert.equal((await api('/api/nodes/test/history?hours=721')).status, 400);
   assert.equal((await api('/api/nodes/test/history?kind=unknown')).status, 400);
   const resource = await api('/api/nodes/test/history?kind=resources&hours=1');
@@ -172,10 +191,36 @@ try {
   assert.equal((await api('/api/nodes/test/history?hours=1')).status, 404);
   assert.equal((await api('/api/admin/nodes/test')).status, 404);
   for (const socket of sockets) socket.destroy();
-  const exited = new Promise(r => server.once('exit', r));
-  server.kill('SIGTERM');
-  assert.equal(await Promise.race([exited, wait(10000).then(() => 'timeout')]), 0, 'Controller did not drain and stop cleanly');
-  console.log('PASS: status cadence, 30-second probes, history, deep links, credential rotation, connection takeover, revocation, graceful shutdown' + (sandbox ? ', hardened systemd agent' : ''));
+  const firstSession = session;
+  const secondLogin = await api('/api/admin/login',{password});
+  assert.equal(secondLogin.status,200);
+  const otherSession = secondLogin.value.token;
+  const nextPassword = randomBytes(24).toString('base64url');
+  const changeBody = {current_password:password,new_password:nextPassword,confirm_password:nextPassword};
+  assert.equal((await api('/api/admin/password',{...changeBody,current_password:'wrong'},'PUT')).status,400);
+  assert.equal((await api('/api/admin/state')).status,200,'Wrong current password must not revoke sessions');
+  assert.equal((await api('/api/admin/password',changeBody,'PUT')).status,204);
+  for (const token of [firstSession,otherSession]) {
+    session = token;
+    assert.equal((await api('/api/admin/state')).status,401,'All old sessions must be revoked immediately');
+  }
+  const newLogin = await api('/api/admin/login',{password:nextPassword});
+  assert.equal(newLogin.status,200); session = newLogin.value.token;
+  assert.equal((await api('/api/admin/login',{password})).status,401,'Old password still works');
+  const throttled = await fetch(base + '/api/admin/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:'incorrect'})});
+  assert.equal(throttled.status,429);
+  assert.ok(Number(throttled.headers.get('retry-after')) > 0);
+  assert.equal((await api('/api/admin/state')).status,200,'Throttled login must not disable existing sessions');
+  assert.equal((await fetch(base + '/api/health')).status,200);
+  await stopServer();
+  await startServer();
+  assert.equal((await api('/api/admin/state')).status,401);
+  const restored = await api('/api/admin/login',{password:nextPassword});
+  assert.equal(restored.status,200); session = restored.value.token;
+  assert.equal((await api('/api/admin/state')).value.settings.latency.interval_seconds,10);
+  for (const secret of [password,nextPassword,nodeToken]) assert.ok(!serverOutput.includes(secret),'Credential appeared in controller logs');
+  await stopServer();
+  console.log('PASS: status cadence, default/custom probes, history, deep links, token rotation, takeover, revocation, legacy login, password change, rate limit, restart persistence, graceful shutdown' + (sandbox ? ', hardened systemd agent' : ''));
 } catch (error) {
   if (agentOutput) console.error(agentOutput.replaceAll(nodeToken, '[redacted]'));
   throw error;

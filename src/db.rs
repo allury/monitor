@@ -10,7 +10,10 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::model::{AppSettings, LatencyTargets, Metrics, PersistEvent, SiteSettings, StoredNode};
+use crate::model::{
+    valid_latency_interval, AppSettings, LatencyTargets, Metrics, PersistEvent, SiteSettings,
+    StoredNode, DEFAULT_LATENCY_INTERVAL_SECS,
+};
 
 pub fn open(path: &Path) -> Result<Connection> {
     let connection =
@@ -20,10 +23,12 @@ pub fn open(path: &Path) -> Result<Connection> {
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
          PRAGMA foreign_keys=ON;
-         PRAGMA temp_store=MEMORY;
+         PRAGMA temp_store=FILE;
          PRAGMA cache_size=-8192;
-         PRAGMA wal_autocheckpoint=1000;
-         PRAGMA journal_size_limit=67108864;",
+         PRAGMA mmap_size=0;
+         PRAGMA cache_spill=ON;
+         PRAGMA wal_autocheckpoint=256;
+         PRAGMA journal_size_limit=1048576;",
     )?;
     migrate(&connection)?;
     Ok(connection)
@@ -124,7 +129,7 @@ pub fn ensure_admin(connection: &Connection) -> Result<Option<String>> {
         return Ok(None);
     }
     let password = random_secret(24);
-    let encoded = URL_SAFE_NO_PAD.encode(token_hash(&password));
+    let encoded = crate::auth::hash_password(&password)?;
     connection.execute(
         "INSERT INTO settings (key, value) VALUES ('admin_hash', ?1)",
         [encoded],
@@ -132,16 +137,21 @@ pub fn ensure_admin(connection: &Connection) -> Result<Option<String>> {
     Ok(Some(password))
 }
 
-pub fn admin_hash(connection: &Connection) -> Result<Vec<u8>> {
+pub fn admin_initialized(connection: &Connection) -> Result<bool> {
+    Ok(setting(connection, "admin_hash")?.is_some())
+}
+
+pub fn admin_hash(connection: &Connection) -> Result<String> {
     let encoded = setting(connection, "admin_hash")?.context("管理员密钥尚未初始化")?;
-    URL_SAFE_NO_PAD
-        .decode(encoded)
-        .context("管理员密钥摘要损坏")
+    if !crate::auth::valid_credential(&encoded) {
+        bail!("管理员密码摘要损坏");
+    }
+    Ok(encoded)
 }
 
 pub fn reset_admin(path: &Path) -> Result<String> {
     let password = random_secret(24);
-    let encoded = URL_SAFE_NO_PAD.encode(token_hash(&password));
+    let encoded = crate::auth::hash_password(&password)?;
     let connection = open(path)?;
     connection.execute(
         "INSERT INTO settings (key, value) VALUES ('admin_hash', ?1)
@@ -152,9 +162,12 @@ pub fn reset_admin(path: &Path) -> Result<String> {
 }
 
 pub fn load_settings(connection: &Connection) -> Result<AppSettings> {
-    let latency = setting(connection, "latency_targets")?
+    let mut latency = setting(connection, "latency_targets")?
         .and_then(|value| serde_json::from_str::<LatencyTargets>(&value).ok())
         .unwrap_or_default();
+    if !valid_latency_interval(latency.interval_seconds) {
+        latency.interval_seconds = DEFAULT_LATENCY_INTERVAL_SECS;
+    }
     let mut site = setting(connection, "site")?
         .and_then(|value| serde_json::from_str::<SiteSettings>(&value).ok())
         .unwrap_or_default();
@@ -171,14 +184,29 @@ pub fn load_settings(connection: &Connection) -> Result<AppSettings> {
     })
 }
 
+pub fn change_admin_password(path: &Path, previous: &str, next: &str) -> Result<bool> {
+    let connection = open(path)?;
+    Ok(connection.execute(
+        "UPDATE settings SET value=?1 WHERE key='admin_hash' AND value=?2",
+        params![next, previous],
+    )? == 1)
+}
+
 pub fn save_latency(path: &Path, targets: &LatencyTargets) -> Result<u64> {
+    if !valid_latency_interval(targets.interval_seconds) {
+        bail!("检测间隔必须为 10–3600 秒");
+    }
     let mut connection = open(path)?;
     let transaction = connection.transaction()?;
     let old = load_settings(&transaction)?;
     if old.latency == *targets {
         return Ok(old.latency_revision);
     }
-    let revision = old.latency_revision + 1;
+    // A cadence change must not hide the existing history of the same targets.
+    let changed_targets = old.latency.telecom != targets.telecom
+        || old.latency.unicom != targets.unicom
+        || old.latency.mobile != targets.mobile;
+    let revision = old.latency_revision + u64::from(changed_targets);
     for (key, value) in [
         ("latency_targets", serde_json::to_string(targets)?),
         ("latency_revision", revision.to_string()),
@@ -496,12 +524,18 @@ pub fn history(
     )?;
     connection.busy_timeout(Duration::from_secs(2))?;
     connection.pragma_update(None, "cache_size", -1024)?;
+    connection
+        .execute_batch("PRAGMA mmap_size=0; PRAGMA temp_store=FILE; PRAGMA cache_spill=ON;")?;
     if node_name(&connection, id)?.is_none() {
         bail!("节点不存在或已停用");
     }
     let settings = load_settings(&connection)?;
     let span = i64::from(hours) * 3600;
-    let quantum = if latency { 30 } else { 60 };
+    let quantum = if latency {
+        settings.latency.interval_seconds as i64
+    } else {
+        60
+    };
     let step = ((span + 1199 * quantum) / (1200 * quantum)).max(1) * quantum;
     let mut response = HistoryResponse {
         from: now - span,
@@ -710,6 +744,7 @@ mod tests {
             let sample = LatencySample {
                 id,
                 revision: 0,
+                interval_seconds: Some(30),
                 values: Latency {
                     telecom: value,
                     unicom: Some(30.0),
@@ -743,6 +778,7 @@ mod tests {
         let sample = LatencySample {
             id: 1,
             revision: 0,
+            interval_seconds: Some(30),
             values: Latency::default(),
         };
         persist_batch(
@@ -849,6 +885,7 @@ mod tests {
         let sample = LatencySample {
             id: 1,
             revision: 0,
+            interval_seconds: Some(30),
             values: Latency::default(),
         };
         persist_batch(
@@ -878,5 +915,104 @@ mod tests {
         let nodes = load_nodes(&open(&path).unwrap()).unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].token_hash, token_hash(&token));
+    }
+
+    #[test]
+    fn interval_changes_preserve_history_credentials_and_target_revision() {
+        let (_dir, path, node) = fixture();
+        let mut connection = open(&path).unwrap();
+        persist_batch(
+            &mut connection,
+            &[PersistEvent {
+                node: node.clone(),
+                write_sample: false,
+                latency: Some(LatencySample {
+                    id: 1,
+                    revision: 0,
+                    interval_seconds: Some(30),
+                    values: Latency::default(),
+                }),
+            }],
+        )
+        .unwrap();
+        let targets = LatencyTargets {
+            interval_seconds: 60,
+            ..LatencyTargets::default()
+        };
+        assert_eq!(save_latency(&path, &targets).unwrap(), 0);
+        drop(connection);
+        let connection = open(&path).unwrap();
+        assert_eq!(load_settings(&connection).unwrap().latency, targets);
+        assert_eq!(
+            load_nodes(&connection).unwrap()[0].token_hash,
+            node.token_hash
+        );
+        let history = history(&path, "n", 1, true, node.last_seen + 65).unwrap();
+        assert_eq!(history.latency.len(), 1);
+        assert_eq!(history.latency[0].telecom_failures, 1);
+        assert_eq!(history.step, 60);
+        for interval_seconds in [0, 9, 3601] {
+            assert!(save_latency(
+                &path,
+                &LatencyTargets {
+                    interval_seconds,
+                    ..targets.clone()
+                }
+            )
+            .is_err());
+        }
+        assert_eq!(load_settings(&connection).unwrap().latency, targets);
+        save_setting(
+            &path,
+            "latency_targets",
+            r#"{"telecom":"legacy.example:80","unicom":"u.example:80","mobile":"m.example:80"}"#,
+        )
+        .unwrap();
+        let legacy = load_settings(&connection).unwrap().latency;
+        assert_eq!(legacy.telecom, "legacy.example:80");
+        assert_eq!(legacy.interval_seconds, 30);
+    }
+
+    #[test]
+    fn sqlite_writer_uses_bounded_cache_and_checkpoint_settings() {
+        let (_dir, path, _node) = fixture();
+        let connection = open(&path).unwrap();
+        for (key, expected) in [
+            ("cache_size", -8192),
+            ("busy_timeout", 5000),
+            ("wal_autocheckpoint", 256),
+            ("journal_size_limit", 1048576),
+            ("mmap_size", 0),
+            ("temp_store", 1),
+            ("synchronous", 1),
+        ] {
+            let actual: i64 = connection
+                .pragma_query_value(None, key, |row| row.get(0))
+                .unwrap();
+            assert_eq!(actual, expected, "{key}");
+        }
+        let journal: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+    }
+
+    #[test]
+    fn admin_initialization_and_password_change_preserve_legacy_and_node_keys() {
+        let (_dir, path, node) = fixture();
+        let connection = open(&path).unwrap();
+        let legacy = URL_SAFE_NO_PAD.encode(token_hash("legacy-random-credential"));
+        save_setting(&path, "admin_hash", &legacy).unwrap();
+        assert!(ensure_admin(&connection).unwrap().is_none());
+        assert_eq!(admin_hash(&connection).unwrap(), legacy);
+        let next = crate::auth::hash_password("a new administrator passphrase").unwrap();
+        assert!(!change_admin_password(&path, "stale", &next).unwrap());
+        assert_eq!(admin_hash(&connection).unwrap(), legacy);
+        assert!(change_admin_password(&path, &legacy, &next).unwrap());
+        assert_eq!(admin_hash(&open(&path).unwrap()).unwrap(), next);
+        assert_eq!(
+            load_nodes(&connection).unwrap()[0].token_hash,
+            node.token_hash
+        );
     }
 }

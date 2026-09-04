@@ -1,6 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u8 = 1;
+pub const DEFAULT_LATENCY_INTERVAL_SECS: u64 = 30;
+
+fn default_latency_interval() -> u64 {
+    DEFAULT_LATENCY_INTERVAL_SECS
+}
+
+pub fn valid_latency_interval(seconds: u64) -> bool {
+    (10..=3600).contains(&seconds)
+}
 #[cfg(feature = "server")]
 pub const OFFLINE_AFTER_SECS: i64 = 12;
 
@@ -15,6 +24,8 @@ pub struct Latency {
 pub struct LatencySample {
     pub id: u64,
     pub revision: u64,
+    #[serde(default)]
+    pub interval_seconds: Option<u64>,
     pub values: Latency,
 }
 
@@ -79,6 +90,8 @@ pub struct LatencyTargets {
     pub telecom: String,
     pub unicom: String,
     pub mobile: String,
+    #[serde(default = "default_latency_interval")]
+    pub interval_seconds: u64,
 }
 
 impl Default for LatencyTargets {
@@ -87,6 +100,7 @@ impl Default for LatencyTargets {
             telecom: "ha-ct-v4.ip.zstaticcdn.com:80".to_owned(),
             unicom: "ha-cu-v4.ip.zstaticcdn.com:80".to_owned(),
             mobile: "ha-cm-v4.ip.zstaticcdn.com:80".to_owned(),
+            interval_seconds: DEFAULT_LATENCY_INTERVAL_SECS,
         }
     }
 }
@@ -352,5 +366,27 @@ mod tests {
         let metrics: Metrics = serde_json::from_value(json).unwrap();
         assert!(metrics.network.is_empty());
         assert!(metrics.latency_sample.is_none());
+    }
+
+    #[test]
+    fn legacy_latency_config_and_samples_remain_readable() {
+        let targets: LatencyTargets = serde_json::from_str(
+            r#"{"telecom":"a.example:80","unicom":"b.example:80","mobile":"c.example:80"}"#,
+        )
+        .unwrap();
+        assert_eq!(targets.interval_seconds, 30);
+        assert_eq!(targets.telecom, "a.example:80");
+        let sample: LatencySample = serde_json::from_str(
+            r#"{"id":1,"revision":2,"values":{"telecom":null,"unicom":0,"mobile":30}}"#,
+        )
+        .unwrap();
+        assert_eq!(sample.interval_seconds, None);
+        assert_eq!(sample.values.unicom, Some(0.0));
+        for value in [10, 30, 60, 3600] {
+            assert!(valid_latency_interval(value));
+        }
+        for value in [0, 9, 3601, u64::MAX] {
+            assert!(!valid_latency_interval(value));
+        }
     }
 }

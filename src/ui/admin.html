@@ -28,10 +28,9 @@
     <main class="auth-page" id="login-view">
       <form class="auth-card" id="login-form">
         <h1>进入后台</h1>
-        <p>使用主控首次启动时显示的管理员密钥。</p>
         <div class="field">
-          <label for="password">管理员密钥</label>
-          <input class="input" id="password" name="password" type="password" autocomplete="current-password" required />
+          <label for="password">管理员密码</label>
+          <input class="input" id="password" name="password" type="password" autocomplete="current-password" maxlength="512" required />
         </div>
         <button class="button full" type="submit">登录</button>
         <div class="form-error" id="login-error" role="alert"></div>
@@ -65,10 +64,11 @@
 
       <section class="panel" id="latency-panel">
         <form class="panel-card settings-form" id="latency-form">
-          <div class="panel-head"><div><h2>三网延迟地址</h2><p>每 30 秒检测一轮并记录。支持 host:port 和 [IPv6]:port；修改地址后显示新目标的历史。</p><p id="agent-upgrade-note" hidden>有节点使用旧版探针，需要手动更新后才会按 30 秒检测并记录。</p></div></div>
+          <div class="panel-head"><div><h2>三网延迟检测</h2><p>支持 host:port 和 [IPv6]:port；修改地址后显示新目标的历史。</p><p id="agent-upgrade-note" hidden>部分节点尚未上报自定义间隔支持；旧版探针需手动更新。</p></div></div>
           <div class="field"><label for="latency-telecom">电信</label><input class="input" id="latency-telecom" placeholder="ha-ct-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>
           <div class="field"><label for="latency-unicom">联通</label><input class="input" id="latency-unicom" placeholder="ha-cu-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>
           <div class="field"><label for="latency-mobile">移动</label><input class="input" id="latency-mobile" placeholder="ha-cm-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>
+          <div class="field"><label for="latency-interval">检测间隔（秒，三网共用）</label><input class="input" id="latency-interval" type="number" min="10" max="3600" step="1" value="30" required /></div>
           <div class="form-actions"><button class="button" type="submit">保存</button><span class="save-status" id="latency-status"></span></div>
         </form>
       </section>
@@ -80,6 +80,13 @@
           <div class="field"><label for="site-description">站点描述（页面元信息）</label><input class="input" id="site-description" maxlength="120" /></div>
           <div class="field"><label for="site-footer">页脚文字（留空不显示）</label><input class="input" id="site-footer" maxlength="120" /></div>
           <div class="form-actions"><button class="button" type="submit">保存</button><span class="save-status" id="site-status"></span></div>
+        </form>
+        <form class="panel-card settings-form" id="password-form">
+          <div class="panel-head"><div><h2>修改管理员密码</h2><p>15–128 个字符。修改后所有后台会话退出，节点密钥不受影响。</p></div></div>
+          <div class="field"><label for="current-password">当前密码</label><input class="input" id="current-password" type="password" autocomplete="current-password" maxlength="512" required /></div>
+          <div class="field"><label for="new-password">新密码</label><input class="input" id="new-password" type="password" autocomplete="new-password" maxlength="512" required /></div>
+          <div class="field"><label for="confirm-password">确认新密码</label><input class="input" id="confirm-password" type="password" autocomplete="new-password" maxlength="512" required /></div>
+          <div class="form-actions"><button class="button" type="submit">修改密码</button><span class="save-status" id="password-status" role="status"></span></div>
         </form>
       </section>
     </main>

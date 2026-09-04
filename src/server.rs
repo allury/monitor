@@ -23,7 +23,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, mpsc, watch, RwLock, Semaphore};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, RwLock, Semaphore};
 use tokio::time::{interval, timeout, MissedTickBehavior};
 use tracing::{error, info, warn};
 
@@ -48,8 +48,7 @@ struct AppState {
     agent_config: watch::Sender<(LatencyTargets, u64)>,
     reports: mpsc::Sender<IncomingReport>,
     database: PathBuf,
-    admin_hash: Arc<Vec<u8>>,
-    sessions: Arc<RwLock<HashMap<String, Instant>>>,
+    auth: Arc<Mutex<crate::auth::AdminAuth>>,
     settings: Arc<RwLock<AppSettings>>,
     shutdown: watch::Receiver<bool>,
     history_slots: Arc<Semaphore>,
@@ -65,10 +64,8 @@ struct IncomingReport {
 
 pub async fn run(options: ServerOptions) -> Result<()> {
     let connection = db::open(&options.database)?;
-    if let Some(password) = db::ensure_admin(&connection)? {
-        println!("管理员密钥（仅显示一次）：{password}");
-    }
-    let admin_hash = Arc::new(db::admin_hash(&connection)?);
+    let admin_hash = db::admin_hash(&connection)
+        .context("请在交互终端执行 monitor-server admin init --db <数据库路径> 初始化管理员")?;
     let loaded_settings = db::load_settings(&connection)?;
     let stored = db::load_nodes(&connection)?;
     drop(connection);
@@ -118,8 +115,7 @@ pub async fn run(options: ServerOptions) -> Result<()> {
         agent_config,
         reports: reports_tx,
         database: options.database.clone(),
-        admin_hash,
-        sessions: Arc::new(RwLock::new(HashMap::new())),
+        auth: Arc::new(Mutex::new(crate::auth::AdminAuth::new(admin_hash)?)),
         settings,
         shutdown: shutdown_rx.clone(),
         history_slots: Arc::new(Semaphore::new(4)),
@@ -141,6 +137,7 @@ pub async fn run(options: ServerOptions) -> Result<()> {
         .route("/api/agent", get(agent_socket))
         .route("/api/admin/login", post(admin_login))
         .route("/api/admin/logout", post(admin_logout))
+        .route("/api/admin/password", put(admin_change_password))
         .route("/api/admin/state", get(admin_state))
         .route("/api/admin/nodes", post(admin_create_node))
         .route(
@@ -561,6 +558,9 @@ fn valid_report(report: &AgentReport) -> bool {
             sample.id > 0
                 && sample.id <= i64::MAX as u64
                 && sample.revision <= i64::MAX as u64
+                && sample
+                    .interval_seconds
+                    .is_none_or(crate::model::valid_latency_interval)
                 && [
                     sample.values.telecom,
                     sample.values.unicom,
@@ -618,20 +618,30 @@ struct AdminNodeResponse {
 }
 
 async fn admin_login(State(state): State<AppState>, Json(request): Json<LoginRequest>) -> Response {
-    if request.password.len() > 256 {
-        return json_error(StatusCode::UNAUTHORIZED, "管理员密钥错误");
+    if request.password.len() > 512 {
+        return json_error(StatusCode::UNAUTHORIZED, "管理员密码错误");
     }
-    let provided = db::token_hash(&request.password);
-    let allowed: bool = provided
-        .as_slice()
-        .ct_eq(state.admin_hash.as_slice())
-        .into();
+    // Keep the owned guard in the worker: disconnecting clients cannot bypass
+    // the single concurrent password verification or race a password change.
+    let Ok(mut auth) = state.auth.clone().try_lock_owned() else {
+        return auth_throttled();
+    };
+    if !auth.allow_attempt(Instant::now()) {
+        return auth_throttled();
+    }
+    let Ok((mut auth, allowed)) = tokio::task::spawn_blocking(move || {
+        let allowed = crate::auth::verify_password(&auth.credential, &request.password);
+        (auth, allowed)
+    })
+    .await
+    else {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "登录暂不可用");
+    };
     if !allowed {
-        tokio::time::sleep(Duration::from_millis(350)).await;
-        return json_error(StatusCode::UNAUTHORIZED, "管理员密钥错误");
+        return json_error(StatusCode::UNAUTHORIZED, "管理员密码错误");
     }
     let token = random_session();
-    let mut sessions = state.sessions.write().await;
+    let sessions = &mut auth.sessions;
     sessions.retain(|_, expiry| *expiry > Instant::now());
     if sessions.len() >= 128 {
         return json_error(StatusCode::TOO_MANY_REQUESTS, "会话过多，请先退出其他会话");
@@ -645,9 +655,82 @@ async fn admin_login(State(state): State<AppState>, Json(request): Json<LoginReq
 
 async fn admin_logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = bearer_token(&headers) {
-        state.sessions.write().await.remove(token);
+        state.auth.lock().await.sessions.remove(token);
     }
     empty(StatusCode::NO_CONTENT)
+}
+
+fn auth_throttled() -> Response {
+    let mut response = json_error(StatusCode::TOO_MANY_REQUESTS, "尝试过于频繁，请稍后重试");
+    response
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from_static("60"));
+    response
+}
+
+#[derive(Deserialize)]
+struct PasswordChange {
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+}
+
+async fn admin_change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PasswordChange>,
+) -> Response {
+    let Some(token) = bearer_token(&headers).filter(|token| token.len() <= 128) else {
+        return json_error(StatusCode::UNAUTHORIZED, "请先登录");
+    };
+    let Ok(mut auth) = state.auth.clone().try_lock_owned() else {
+        return auth_throttled();
+    };
+    if !auth
+        .sessions
+        .get(token)
+        .is_some_and(|expiry| *expiry > Instant::now())
+    {
+        return json_error(StatusCode::UNAUTHORIZED, "请先登录");
+    }
+    if !auth.allow_attempt(Instant::now()) {
+        return auth_throttled();
+    }
+    if request.current_password.len() > 512
+        || !crate::auth::valid_password(&request.new_password)
+        || request.new_password != request.confirm_password
+        || request.current_password == request.new_password
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "新密码需为 15–128 个字符、两次输入一致且不同于原密码",
+        );
+    }
+    let path = state.database.clone();
+    // Persist and revoke under the same lock, including if the HTTP request is
+    // cancelled after the write. No old-password login can create a new session.
+    match tokio::task::spawn_blocking(move || -> Result<u8> {
+        if !crate::auth::verify_password(&auth.credential, &request.current_password) {
+            return Ok(1);
+        }
+        let encoded = crate::auth::hash_password(&request.new_password)?;
+        if !db::change_admin_password(&path, &auth.credential, &encoded)? {
+            return Ok(2);
+        }
+        auth.credential = encoded;
+        auth.sessions.clear();
+        Ok(0)
+    })
+    .await
+    {
+        Ok(Ok(0)) => empty(StatusCode::NO_CONTENT),
+        Ok(Ok(1)) => json_error(StatusCode::BAD_REQUEST, "当前密码错误"),
+        Ok(Ok(_)) => json_error(
+            StatusCode::CONFLICT,
+            "密码已在其他位置更改，请重启主控后重新登录",
+        ),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "修改密码失败"),
+    }
 }
 
 async fn admin_state(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -784,24 +867,43 @@ async fn admin_rotate_token(
     }
 }
 
+#[derive(Deserialize)]
+struct LatencyUpdate {
+    telecom: String,
+    unicom: String,
+    mobile: String,
+    interval_seconds: Option<u64>,
+}
+
 async fn admin_save_latency(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(targets): Json<LatencyTargets>,
+    Json(request): Json<LatencyUpdate>,
 ) -> Response {
     if !is_admin(&state, &headers).await {
         return json_error(StatusCode::UNAUTHORIZED, "请先登录");
     }
+    let mut settings = state.settings.write().await;
+    let targets = LatencyTargets {
+        telecom: request.telecom,
+        unicom: request.unicom,
+        mobile: request.mobile,
+        interval_seconds: request
+            .interval_seconds
+            .unwrap_or(settings.latency.interval_seconds),
+    };
+    if !crate::model::valid_latency_interval(targets.interval_seconds) {
+        return json_error(StatusCode::BAD_REQUEST, "检测间隔必须为 10–3600 秒");
+    }
     if !valid_targets(&targets) {
         return json_error(StatusCode::BAD_REQUEST, "地址必须为有效的 host:port");
     }
-    let mut settings = state.settings.write().await;
     let path = state.database.clone();
     let values = targets.clone();
     let revision = match tokio::task::spawn_blocking(move || db::save_latency(&path, &values)).await
     {
         Ok(Ok(revision)) => revision,
-        _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "保存延迟地址失败"),
+        _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "保存延迟设置失败"),
     };
     settings.latency = targets.clone();
     settings.latency_revision = revision;
@@ -856,7 +958,8 @@ async fn is_admin(state: &AppState, headers: &HeaderMap) -> bool {
         return false;
     }
     let now = Instant::now();
-    let mut sessions = state.sessions.write().await;
+    let mut auth = state.auth.lock().await;
+    let sessions = &mut auth.sessions;
     sessions.retain(|_, expiry| *expiry > now);
     sessions.get(token).is_some_and(|expiry| *expiry > now)
 }
@@ -969,7 +1072,14 @@ async fn admin() -> Response {
 }
 
 async fn styles() -> Response {
-    static_response("text/css; charset=utf-8", include_str!("ui/app.css"))
+    static_response(
+        "text/css; charset=utf-8",
+        concat!(
+            include_str!("ui/app.css"),
+            "\n",
+            include_str!("ui/os-icons.css")
+        ),
+    )
 }
 
 async fn script() -> Response {
@@ -1177,6 +1287,7 @@ mod tests {
             report.metrics.latency_sample = Some(crate::model::LatencySample {
                 id: 1,
                 revision: 0,
+                interval_seconds: Some(30),
                 values: Latency::default(),
             });
             tx.send(IncomingReport {

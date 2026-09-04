@@ -26,7 +26,7 @@ wget -qO- https://github.com/allury/monitor/releases/latest/download/install-ser
 curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-server.sh | sudo sh -s -- --public
 ```
 
-HTTP 会明文传输密钥与数据，仅用于临时测试。首次安装显示的管理员密钥请妥善保存。
+HTTP 会明文传输密码、密钥与数据，仅用于临时测试。首次安装请在 SSH 等交互终端执行，保存终端中仅显示一次的管理员密钥；该密钥不写入服务日志。
 
 ### 安装探针
 
@@ -36,9 +36,9 @@ HTTP 会明文传输密钥与数据，仅用于临时测试。首次安装显示
 curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-agent.sh | sudo sh -s -- --server 'https://monitor.example.com' --token '节点密钥'
 ```
 
-将示例地址和密钥替换为后台提供的值。三网检测地址和站点文字均在后台设置。状态默认每 2 秒上报，三网检测每 30 秒一次；每月流量按 UTC 自然月统计。
+将示例地址和密钥替换为后台提供的值。三网检测地址、检测间隔和站点文字均在后台设置。状态默认每 2 秒上报，三网检测默认每 30 秒一次，可设为 10–3600 秒，三网共用；支持该设置的在线探针保存后自动应用。每月流量按 UTC 自然月统计。
 
-延迟记录 TCP 建连时间，失败与缺失记录分开显示。历史保留 30 天，较长时间范围自动汇总。站点描述用于页面元信息，不在首页正文显示；页脚留空时隐藏。
+延迟采用 Komari 的 TCP 高延迟复测规则；失败点留空，失败率可在图表标题旁的统计入口查看。历史保留 30 天，较长时间范围自动汇总。站点描述用于页面元信息，不在首页正文显示；页脚留空时隐藏。
 
 ### 更新
 
@@ -52,9 +52,22 @@ curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-ag
 
 也可将 `curl -fsSL` 换为 `wget -qO-`。更新只替换程序并重启，保留原地址、密钥和服务配置，不需要重新获取或重置密钥。首次安装或更换上报地址时，使用完整安装命令。
 
-主控只保存密钥摘要，无法再次显示原密钥。新机器安装且未保存原密钥时，可在后台重置；原密钥会立即失效。
+主控只保存节点密钥摘要，无法再次显示原密钥。新机器安装且未保存原密钥时，可在后台重置；原密钥会立即失效。
 
 更新顺序为先主控、后探针。更新前备份主控数据库。安装命令下载[最近正式版](https://github.com/allury/monitor/releases/latest)，不包含尚未发布的源码改动。
+
+### 管理员密码
+
+首次使用安装时生成的管理员密钥登录。旧版密钥继续有效，可在后台“站点设置”修改为 15–128 个字符的密码。修改需验证当前密码，成功后所有后台会话立即退出，不影响节点密钥。
+
+忘记密码时，在主控服务器的交互终端执行；新密钥仅显示在该终端：
+
+```sh
+sudo runuser -u monitor -- /usr/local/bin/monitor-server admin reset --db /var/lib/monitor/monitor.db
+sudo systemctl restart monitor-server
+```
+
+登录与改密共享每分钟 5 次的尝试限制，触发后稍候重试。自行运行主控二进制时，先执行 `monitor-server admin init --db monitor.db`；对已有管理员重复初始化不会更换密码。
 
 ### 查看状态和日志
 

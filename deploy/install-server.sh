@@ -186,14 +186,8 @@ UMask=0077
 WantedBy=multi-user.target
 UNIT
 
-if [ ! -f /var/lib/monitor/monitor.db ]; then
-    echo
-    echo "正在初始化管理员密钥，请立即保存下面显示的密钥："
-    runuser -u monitor -- /usr/local/bin/monitor-server admin reset \
-        --db /var/lib/monitor/monitor.db
-else
-    echo "检测到已有数据库：保留全部数据和原管理员密钥。"
-fi
+runuser -u monitor -- /usr/local/bin/monitor-server admin init \
+    --db /var/lib/monitor/monitor.db
 
 systemctl daemon-reload
 systemctl enable monitor-server >/dev/null

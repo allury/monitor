@@ -33,13 +33,18 @@ test('monthly markup and binary units are unchanged while resource percentages a
   assert.ok(html.includes('<div class="metric"><div class="metric-label"><span>本月流量</span></div><strong class="month-value">3 MiB</strong><span class="metric-sub">↓ 1 MiB · ↑ 2 MiB</span></div>'));
   assert.ok(html.includes('1 GB'));
 });
-test('system labels shorten release descriptions without inventing virtualization or expiry dates', () => {
+test('system labels shorten release descriptions and OS marks replace unsupported expiry', () => {
   const sandbox = context();
   assert.equal(vm.runInContext('systemLabel({os:"Debian GNU/Linux 12 (bookworm)",virtualization:"virtualized",arch:"x86_64"})', sandbox), 'Debian 12 · vm · x86_64');
   assert.equal(vm.runInContext('systemLabel({os:"Ubuntu 24.04.3 LTS",virtualization:"unknown"})', sandbox), 'Ubuntu 24.04 · unknown');
-  assert.equal(vm.runInContext('expiryLabel(null)', sandbox), '∞');
-  assert.equal(vm.runInContext('expiryLabel("not-a-date")', sandbox), '∞');
-  assert.equal(vm.runInContext('expiryLabel(172800, 0)', sandbox), '2 天后到期');
+  for (const [os, mark] of [['Debian GNU/Linux 12','debian'],['Ubuntu 24.04 LTS','ubuntu'],['Alpine Linux v3.24','alpine'],['Rocky Linux 9','linux'],['','linux']]) {
+    sandbox.os = os;
+    assert.ok(vm.runInContext('osMark(os)', sandbox).includes('os-' + mark));
+  }
+  assert.ok(!source.includes('expiryLabel'));
+  const icons = readFileSync(new URL('../src/ui/os-icons.css', import.meta.url), 'utf8');
+  assert.ok(icons.includes('data:image/svg+xml'));
+  assert.ok(!icons.includes('https://'));
 });
 test('live speed trend is bounded, ignores duplicate snapshots and breaks across gaps', () => {
   const sandbox = context();
@@ -95,14 +100,27 @@ test('chart hit testing does not invent readings inside missing history', () => 
   assert.equal(vm.runInContext('chartHit([{at:100},{at:160},{at:400}], 280, 60)', sandbox), -1);
   assert.equal(vm.runInContext('nearestPoint([], 0)', sandbox), -1);
 });
-test('chart readings omit interaction hints and zero-failure clutter but retain real failures', () => {
+test('latency failures are gaps without failure tooltips; valid zero readings remain selectable', () => {
   const sandbox = context();
   vm.runInContext('const series={key:"telecom",label:"电信",format:v=>Number.isFinite(v)?v.toFixed(1)+" ms":"失败",failure:"telecom_failures"}', sandbox);
   assert.equal(vm.runInContext('chartReading({telecom:32,telecom_failures:0,count:4},series)', sandbox), '电信：32.0 ms');
-  assert.equal(vm.runInContext('chartReading({telecom:32,telecom_failures:1,count:4},series)', sandbox), '电信：32.0 ms · 失败 1/4');
-  assert.equal(vm.runInContext('chartReading({telecom:null,telecom_failures:4,count:4},series)', sandbox), '电信：失败 4/4');
+  assert.equal(vm.runInContext('chartReading({telecom:32,telecom_failures:1,count:4},series)', sandbox), '电信：32.0 ms');
+  assert.equal(vm.runInContext('chartReading({telecom:null,telecom_failures:4,count:4},series)', sandbox), null);
+  assert.equal(vm.runInContext('chartReading({telecom:-1,count:1},series)', sandbox), null);
+  assert.equal(vm.runInContext('chartReading({telecom:0,count:1},series)', sandbox), '电信：0.0 ms');
   assert.equal(vm.runInContext('chartReading({cpu:0},{key:"cpu",label:"CPU",format:pct})', sandbox), 'CPU：0.0%');
   assert.ok(!source.includes('已固定'));
+  assert.ok(!source.includes('class="failure"'));
+});
+test('latency statistics are optional and weighted by individual samples, not buckets', () => {
+  const sandbox = context();
+  const html = vm.runInContext('latencyStats([{count:1,telecom_failures:1},{count:9,telecom_failures:0}],{label:"电信",failure:"telecom_failures"})', sandbox);
+  assert.ok(html.startsWith('<details class="latency-stats">'));
+  assert.ok(html.includes('失败率</dt><dd>10.0%'));
+  assert.ok(html.includes('检测次数</dt><dd>10'));
+  assert.ok(html.includes('成功次数</dt><dd>9'));
+  assert.ok(!html.includes(' open'));
+  assert.ok(vm.runInContext('latencyStats([],{label:"电信",failure:"telecom_failures"})', sandbox).includes('失败率</dt><dd>—'));
 });
 test('untrusted node text is escaped in cards and details', () => {
   const sandbox = context();

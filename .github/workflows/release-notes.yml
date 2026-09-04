@@ -7,12 +7,16 @@ on:
       - docs/releases/*.md
       - .github/workflows/release-notes.yml
   workflow_dispatch:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
 
 permissions:
   contents: read
 
 jobs:
   sync:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -22,9 +26,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          published=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName')
           for notes in docs/releases/*.md; do
             tag="${notes##*/}"
             tag="${tag%.md}"
-            gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+            if ! printf '%s\n' "$published" | grep -Fxq -- "$tag"; then
+              echo "Not published yet: $tag"
+              continue
+            fi
             gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
           done

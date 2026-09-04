@@ -28,6 +28,7 @@ jobs:
           printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml)
           test "$tag" = "v$version"
+          test -f "docs/releases/$tag.md"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   verify:
@@ -108,4 +109,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Monitor $RELEASE_TAG" \
-            --notes-file README.md
+            --notes-file "docs/releases/$RELEASE_TAG.md"

@@ -36,11 +36,11 @@ HTTP 会明文传输密钥与数据，仅用于临时测试。首次安装显示
 curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-agent.sh | sudo sh -s -- --server 'https://monitor.example.com' --token '节点密钥'
 ```
 
-将示例地址和密钥替换为后台提供的值。三网检测地址和站点文字均在后台设置。
+将示例地址和密钥替换为后台提供的值。三网检测地址和站点文字均在后台设置。状态默认每 2 秒上报，三网检测每 30 秒一次；每月流量按 UTC 自然月统计。
 
 ### 更新
 
-重新执行对应的安装命令即可。主控保留数据库和管理员密钥；探针更新时使用该节点的上报地址和密钥。
+重新执行对应的安装命令即可。主控保留数据库和管理员密钥；通过 IP 直接测试的主控更新时仍需带上 `--public`，否则会恢复为仅监听本机。探针更新时使用该节点的上报地址和密钥。
 
 更新顺序为先主控、后探针。更新前备份主控数据库。安装命令下载[最近正式版](https://github.com/allury/monitor/releases/latest)，不包含尚未发布的源码改动。
 

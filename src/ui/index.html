@@ -43,9 +43,9 @@
         <button type="button" class="selected" data-tab="resources" aria-pressed="true">资源</button>
         <button type="button" data-tab="latency" aria-pressed="false">网络延迟</button>
       </nav>
-      <nav class="time-ranges" aria-label="历史时间范围">
+      <div class="history-controls"><nav class="time-ranges" aria-label="历史时间范围">
         <button type="button" data-hours="1">1 小时</button><button type="button" data-hours="6" class="selected" aria-pressed="true">6 小时</button><button type="button" data-hours="24">24 小时</button><button type="button" data-hours="168">7 天</button><button type="button" data-hours="720">30 天</button>
-      </nav>
+      </nav><label id="latency-options" class="peak-control" hidden><input id="latency-clip" type="checkbox">平滑</label></div>
       <div id="charts" aria-live="polite"></div>
     </section>
   </main>

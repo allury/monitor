@@ -750,6 +750,20 @@ async fn admin_state(State(state): State<AppState>, headers: HeaderMap) -> Respo
     json_value(StatusCode::OK, &AdminStateResponse { settings, nodes })
 }
 
+// Once authorized, finish both the database and in-memory update even when the
+// HTTP client disconnects. Dropping a spawn_blocking handle cannot cancel its
+// database write; dropping only the surrounding handler would leave stale keys.
+async fn finish_mutation(
+    operation: impl std::future::Future<Output = Response> + Send + 'static,
+) -> Response {
+    tokio::spawn(operation).await.unwrap_or_else(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "保存失败，请重新查询当前状态",
+        )
+    })
+}
+
 async fn admin_create_node(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -758,30 +772,33 @@ async fn admin_create_node(
     if !is_admin(&state, &headers).await {
         return json_error(StatusCode::UNAUTHORIZED, "请先登录");
     }
-    let mut nodes = state.nodes.write().await;
-    let path = state.database.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<(String, StoredNode)> {
-        let token = db::create_node(&path, &request.id, &request.name)?;
-        let node = db::load_nodes(&db::open(&path)?)?
-            .into_iter()
-            .find(|node| node.id == request.id)
-            .context("创建后的节点不存在")?;
-        Ok((token, node))
-    })
-    .await;
-    match result {
-        Ok(Ok((token, node))) => {
-            let response = CreateNodeResponse {
-                id: node.id.clone(),
-                name: node.name.clone(),
-                token,
-            };
-            nodes.insert(node.id.clone(), node);
-            json_value(StatusCode::CREATED, &response)
+    finish_mutation(async move {
+        let mut nodes = state.nodes.write().await;
+        let path = state.database.clone();
+        let result = tokio::task::spawn_blocking(move || -> Result<(String, StoredNode)> {
+            let token = db::create_node(&path, &request.id, &request.name)?;
+            let node = db::load_nodes(&db::open(&path)?)?
+                .into_iter()
+                .find(|node| node.id == request.id)
+                .context("创建后的节点不存在")?;
+            Ok((token, node))
+        })
+        .await;
+        match result {
+            Ok(Ok((token, node))) => {
+                let response = CreateNodeResponse {
+                    id: node.id.clone(),
+                    name: node.name.clone(),
+                    token,
+                };
+                nodes.insert(node.id.clone(), node);
+                json_value(StatusCode::CREATED, &response)
+            }
+            Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+            Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "创建节点失败"),
         }
-        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, &error.to_string()),
-        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "创建节点失败"),
-    }
+    })
+    .await
 }
 
 async fn admin_node(
@@ -816,21 +833,24 @@ async fn admin_revoke_node(
     if !is_admin(&state, &headers).await {
         return json_error(StatusCode::UNAUTHORIZED, "请先登录");
     }
-    let mut nodes = state.nodes.write().await;
-    let path = state.database.clone();
-    let key = id.clone();
-    match tokio::task::spawn_blocking(move || db::revoke_node(&path, &key)).await {
-        Ok(Ok(true)) => {
-            if let Some(node) = nodes.remove(&id) {
-                if let Some(close) = node.close_signal {
-                    let _ = close.send(true);
+    finish_mutation(async move {
+        let mut nodes = state.nodes.write().await;
+        let path = state.database.clone();
+        let key = id.clone();
+        match tokio::task::spawn_blocking(move || db::revoke_node(&path, &key)).await {
+            Ok(Ok(true)) => {
+                if let Some(node) = nodes.remove(&id) {
+                    if let Some(close) = node.close_signal {
+                        let _ = close.send(true);
+                    }
                 }
+                empty(StatusCode::NO_CONTENT)
             }
-            empty(StatusCode::NO_CONTENT)
+            Ok(Ok(false)) => json_error(StatusCode::NOT_FOUND, "节点不存在"),
+            _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "停用节点失败"),
         }
-        Ok(Ok(false)) => json_error(StatusCode::NOT_FOUND, "节点不存在"),
-        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "停用节点失败"),
-    }
+    })
+    .await
 }
 
 async fn admin_rotate_token(
@@ -841,30 +861,33 @@ async fn admin_rotate_token(
     if !is_admin(&state, &headers).await {
         return json_error(StatusCode::UNAUTHORIZED, "请先登录");
     }
-    let mut nodes = state.nodes.write().await;
-    let Some(node) = nodes.get_mut(&id) else {
-        return json_error(StatusCode::NOT_FOUND, "节点不存在");
-    };
-    let path = state.database.clone();
-    let key = id.clone();
-    match tokio::task::spawn_blocking(move || db::rotate_node_token(&path, &key)).await {
-        Ok(Ok(Some(token))) => {
-            if let Some(close) = node.close_signal.take() {
-                let _ = close.send(true);
+    finish_mutation(async move {
+        let mut nodes = state.nodes.write().await;
+        let Some(node) = nodes.get_mut(&id) else {
+            return json_error(StatusCode::NOT_FOUND, "节点不存在");
+        };
+        let path = state.database.clone();
+        let key = id.clone();
+        match tokio::task::spawn_blocking(move || db::rotate_node_token(&path, &key)).await {
+            Ok(Ok(Some(token))) => {
+                if let Some(close) = node.close_signal.take() {
+                    let _ = close.send(true);
+                }
+                node.connection_id = 0;
+                node.token_hash = db::token_hash(&token);
+                json_value(
+                    StatusCode::OK,
+                    &CreateNodeResponse {
+                        id,
+                        name: node.name.clone(),
+                        token,
+                    },
+                )
             }
-            node.connection_id = 0;
-            node.token_hash = db::token_hash(&token);
-            json_value(
-                StatusCode::OK,
-                &CreateNodeResponse {
-                    id,
-                    name: node.name.clone(),
-                    token,
-                },
-            )
+            _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "重置密钥失败"),
         }
-        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "重置密钥失败"),
-    }
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -883,32 +906,35 @@ async fn admin_save_latency(
     if !is_admin(&state, &headers).await {
         return json_error(StatusCode::UNAUTHORIZED, "请先登录");
     }
-    let mut settings = state.settings.write().await;
-    let targets = LatencyTargets {
-        telecom: request.telecom,
-        unicom: request.unicom,
-        mobile: request.mobile,
-        interval_seconds: request
-            .interval_seconds
-            .unwrap_or(settings.latency.interval_seconds),
-    };
-    if !crate::model::valid_latency_interval(targets.interval_seconds) {
-        return json_error(StatusCode::BAD_REQUEST, "检测间隔必须为 10–3600 秒");
-    }
-    if !valid_targets(&targets) {
-        return json_error(StatusCode::BAD_REQUEST, "地址必须为有效的 host:port");
-    }
-    let path = state.database.clone();
-    let values = targets.clone();
-    let revision = match tokio::task::spawn_blocking(move || db::save_latency(&path, &values)).await
-    {
-        Ok(Ok(revision)) => revision,
-        _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "保存延迟设置失败"),
-    };
-    settings.latency = targets.clone();
-    settings.latency_revision = revision;
-    state.agent_config.send_replace((targets.clone(), revision));
-    json_value(StatusCode::OK, &targets)
+    finish_mutation(async move {
+        let mut settings = state.settings.write().await;
+        let targets = LatencyTargets {
+            telecom: request.telecom,
+            unicom: request.unicom,
+            mobile: request.mobile,
+            interval_seconds: request
+                .interval_seconds
+                .unwrap_or(settings.latency.interval_seconds),
+        };
+        if !crate::model::valid_latency_interval(targets.interval_seconds) {
+            return json_error(StatusCode::BAD_REQUEST, "检测间隔必须为 10–3600 秒");
+        }
+        if !valid_targets(&targets) {
+            return json_error(StatusCode::BAD_REQUEST, "地址必须为有效的 host:port");
+        }
+        let path = state.database.clone();
+        let values = targets.clone();
+        let revision =
+            match tokio::task::spawn_blocking(move || db::save_latency(&path, &values)).await {
+                Ok(Ok(revision)) => revision,
+                _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "保存延迟设置失败"),
+            };
+        settings.latency = targets.clone();
+        settings.latency_revision = revision;
+        state.agent_config.send_replace((targets.clone(), revision));
+        json_value(StatusCode::OK, &targets)
+    })
+    .await
 }
 
 async fn admin_save_site(
@@ -919,29 +945,32 @@ async fn admin_save_site(
     if !is_admin(&state, &headers).await {
         return json_error(StatusCode::UNAUTHORIZED, "请先登录");
     }
-    let site = SiteSettings {
-        name: site.name.trim().to_owned(),
-        description: site.description.trim().to_owned(),
-        footer: site.footer.trim().to_owned(),
-    };
-    if site.name.is_empty()
-        || site.name.chars().count() > 40
-        || site.description.chars().count() > 120
-        || site.footer.chars().count() > 120
-    {
-        return json_error(StatusCode::BAD_REQUEST, "站点文字超出长度限制");
-    }
-    let mut settings = state.settings.write().await;
-    let path = state.database.clone();
-    let value = site.clone();
-    if !matches!(
-        tokio::task::spawn_blocking(move || db::save_site(&path, &value)).await,
-        Ok(Ok(()))
-    ) {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "保存站点设置失败");
-    }
-    settings.site = site.clone();
-    json_value(StatusCode::OK, &site)
+    finish_mutation(async move {
+        let site = SiteSettings {
+            name: site.name.trim().to_owned(),
+            description: site.description.trim().to_owned(),
+            footer: site.footer.trim().to_owned(),
+        };
+        if site.name.is_empty()
+            || site.name.chars().count() > 40
+            || site.description.chars().count() > 120
+            || site.footer.chars().count() > 120
+        {
+            return json_error(StatusCode::BAD_REQUEST, "站点文字超出长度限制");
+        }
+        let mut settings = state.settings.write().await;
+        let path = state.database.clone();
+        let value = site.clone();
+        if !matches!(
+            tokio::task::spawn_blocking(move || db::save_site(&path, &value)).await,
+            Ok(Ok(()))
+        ) {
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "保存站点设置失败");
+        }
+        settings.site = site.clone();
+        json_value(StatusCode::OK, &site)
+    })
+    .await
 }
 
 fn valid_targets(targets: &LatencyTargets) -> bool {
@@ -1256,6 +1285,83 @@ mod tests {
         assert!(valid_report(&value));
         value.metrics.cpu = 101.0;
         assert!(!valid_report(&value));
+    }
+
+    #[test]
+    fn report_validation_bounds_untrusted_text_samples_and_nonfinite_numbers() {
+        for cpu in [f32::NAN, f32::INFINITY, -1.0, 101.0] {
+            let mut value = report();
+            value.metrics.cpu = cpu;
+            assert!(!valid_report(&value));
+        }
+        for delay in [f32::NAN, f32::NEG_INFINITY, -1.0, 60_001.0] {
+            let mut value = report();
+            value.metrics.latency.telecom = Some(delay);
+            assert!(!valid_report(&value));
+        }
+        let mut value = report();
+        value.hostname = "a".repeat(256);
+        assert!(!valid_report(&value));
+        value.hostname.clear();
+        value.metrics.load[0] = f32::NAN;
+        assert!(!valid_report(&value));
+        value.metrics.load[0] = 0.0;
+        value.metrics.latency_sample = Some(crate::model::LatencySample {
+            id: 1,
+            revision: 0,
+            interval_seconds: Some(0),
+            values: Latency::default(),
+        });
+        assert!(!valid_report(&value));
+        value
+            .metrics
+            .latency_sample
+            .as_mut()
+            .unwrap()
+            .interval_seconds = Some(30);
+        assert!(valid_report(&value));
+        value.metrics.latency_sample.as_mut().unwrap().id = u64::MAX;
+        assert!(!valid_report(&value));
+    }
+
+    #[tokio::test]
+    async fn cancelled_http_waiter_does_not_leave_old_key_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cancel.db");
+        let previous = db::create_node(&path, "n", "Node").unwrap();
+        let node = db::load_nodes(&db::open(&path).unwrap()).unwrap().remove(0);
+        let nodes = Arc::new(RwLock::new(HashMap::from([("n".to_owned(), node)])));
+        let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let worker_nodes = nodes.clone();
+        let worker_path = path.clone();
+        let request = tokio::spawn(finish_mutation(async move {
+            let mut guard = worker_nodes.write().await;
+            let token = tokio::task::spawn_blocking(move || {
+                db::rotate_node_token(&worker_path, "n").unwrap().unwrap()
+            })
+            .await
+            .unwrap();
+            written_tx.send(()).unwrap();
+            resume_rx.await.unwrap();
+            guard.get_mut("n").unwrap().token_hash = db::token_hash(&token);
+            drop(guard);
+            done_tx.send(()).unwrap();
+            empty(StatusCode::NO_CONTENT)
+        }));
+        written_rx.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        resume_tx.send(()).unwrap();
+        timeout(Duration::from_secs(2), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = db::load_nodes(&db::open(&path).unwrap()).unwrap().remove(0);
+        let guard = nodes.read().await;
+        assert_eq!(guard["n"].token_hash, stored.token_hash);
+        assert_ne!(guard["n"].token_hash, db::token_hash(&previous));
     }
 
     #[test]

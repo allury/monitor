@@ -128,12 +128,11 @@ mod linux {
         samples: &watch::Receiver<Option<LatencySample>>,
     ) -> Result<()> {
         let mut request = endpoint.into_client_request().context("控制端地址无效")?;
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            format!("Bearer {}", options.token)
-                .parse()
-                .context("密钥格式无效")?,
-        );
+        let mut authorization: http::HeaderValue = format!("Bearer {}", options.token)
+            .parse()
+            .context("密钥格式无效")?;
+        authorization.set_sensitive(true);
+        request.headers_mut().insert(AUTHORIZATION, authorization);
         request.headers_mut().insert(
             USER_AGENT,
             format!("monitor-agent/{VERSION}").parse().unwrap(),
@@ -514,6 +513,8 @@ mod linux {
     fn disk_space(path: &str) -> Result<(u64, u64)> {
         let path = CString::new(Path::new(path).as_os_str().as_bytes())?;
         let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: CString is NUL-terminated and lives across the call; stats is
+        // writable and is read only after libc reports successful initialization.
         let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
         if result != 0 {
             return Err(std::io::Error::last_os_error()).context("无法读取磁盘统计");
@@ -535,6 +536,8 @@ mod linux {
 
     fn kernel_version() -> String {
         let mut name = std::mem::MaybeUninit::<libc::utsname>::uninit();
+        // SAFETY: uname initializes this correctly sized buffer on success and
+        // guarantees that release is NUL-terminated on the supported Linux ABI.
         if unsafe { libc::uname(name.as_mut_ptr()) } != 0 {
             return "Linux".to_owned();
         }

@@ -21,6 +21,12 @@ jobs:
           rustup default stable
       - name: Formatting
         run: cargo fmt --all --check
+      - name: Rust dependency audit
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz -o "$RUNNER_TEMP/cargo-audit.tgz"
+          printf '%s  %s\n' ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39 "$RUNNER_TEMP/cargo-audit.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/cargo-audit.tgz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit" audit --deny warnings
       - name: Shell scripts
         run: shellcheck deploy/*.sh tests/*.sh
       - name: Static checks

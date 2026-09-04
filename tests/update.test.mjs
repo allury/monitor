@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,chmodSync,rmSync,readdirSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,chmodSync,rmSync,readdirSync,statSync,symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -26,6 +26,7 @@ function fixture() {
   executable('id',"printf '0\\n'\n");
   executable('uname',"if [ \"${1:-}\" = '-m' ]; then printf '%s\\n' \"${MOCK_ARCH:-x86_64}\"; else printf 'Linux\\n'; fi\n");
   executable('sleep','exit 0\n');
+  executable('chown','exit 0\n');
   executable('systemctl',`case "$1" in
 show) printf '%s\\n' '{ path=${installed} ; argv[]=${installed} --server https://original.example ; }' ;;
 restart)
@@ -34,6 +35,7 @@ restart)
     touch "$MOCK_ROOT/restart-failed"; exit 1
   fi ;;
 is-active) exit 0 ;;
+daemon-reload|enable) [ "\${MOCK_INSTALL:-0}" = 1 ] ;;
 *) echo "Unexpected service mutation: $1" >&2; exit 2 ;;
 esac\n`);
   executable('curl',`if [ "\${FAIL_DOWNLOAD:-0}" = 1 ]; then exit 22; fi
@@ -101,5 +103,29 @@ test('update refuses credential overrides and missing installations', {skip:!lin
     f.unchanged(); rmSync(f.installed);
     assert.notEqual(f.run(['--update']).status,0);
     assert.deepEqual(readdirSync(f.bin),[]);
+  } finally {f.close();}
+});
+
+test('reinstallation replaces weak token permissions without exposing the credential', {skip:!linux}, () => {
+  const f=fixture(), tokenFile=join(f.root,'etc/monitor-agent.token'), secret='test-node.private-fixture';
+  try {
+    chmodSync(tokenFile,0o644);
+    const result=f.run(['--binary',f.next,'--server','https://example.com','--token',secret],{MOCK_INSTALL:'1'});
+    assert.equal(result.status,0,result.stderr);
+    assert.equal(statSync(tokenFile).mode & 0o777,0o600);
+    assert.equal(readFileSync(tokenFile,'utf8'),secret+'\n');
+    assert.ok(!(result.stdout+result.stderr).includes(secret));
+    assert.ok(!readdirSync(join(f.root,'etc')).some(name=>name.startsWith('.monitor-agent-credential.')));
+  } finally {f.close();}
+});
+
+test('installation refuses a symlink credential path before replacing the program', {skip:!linux}, () => {
+  const f=fixture(), tokenFile=join(f.root,'etc/monitor-agent.token'), target=join(f.root,'do-not-touch');
+  try {
+    writeFileSync(target,'preserve');rmSync(tokenFile);symlinkSync(target,tokenFile);
+    const result=f.run(['--binary',f.next,'--server','https://example.com','--token','private-fixture'],{MOCK_INSTALL:'1'});
+    assert.notEqual(result.status,0);
+    assert.equal(readFileSync(target,'utf8'),'preserve');
+    assert.equal(readFileSync(f.installed,'utf8'),'original-binary');
   } finally {f.close();}
 });

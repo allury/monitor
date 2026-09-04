@@ -122,6 +122,19 @@ try {
   assert.equal(created.status, 201);
   assert.equal((await api('/api/admin/nodes', {id:'test',name:'duplicate'})).status, 400);
   assert.equal((await fetch(base + '/api/admin/nodes/test')).status, 401, 'Node details must require an administrator');
+  for (const [path,method,body] of [
+    ['/api/admin/nodes','POST',{id:'unauthorized',name:'unauthorized'}],
+    ['/api/admin/nodes/test','DELETE',null],
+    ['/api/admin/nodes/test/token','POST',{}],
+    ['/api/admin/latency','PUT',{telecom:'localhost:80',unicom:'localhost:80',mobile:'localhost:80'}],
+    ['/api/admin/site','PUT',{name:'unauthorized',description:'',footer:''}],
+    ['/api/admin/password','PUT',{current_password:'wrong',new_password:'unauthorized password',confirm_password:'unauthorized password'}],
+  ]) {
+    const response=await fetch(base+path,{method,headers:{'content-type':'application/json',origin:'https://untrusted.example'},body:body===null?undefined:JSON.stringify(body)});
+    assert.equal(response.status,401,'Unauthenticated mutation accepted: '+path);
+  }
+  const publicSnapshot=await (await fetch(base+'/api/nodes')).text();
+  assert.ok(!publicSnapshot.includes('token_hash') && !publicSnapshot.includes(created.value.token),'Public status leaked a credential');
   let detail = await api('/api/admin/nodes/test');
   assert.equal(detail.status, 200);
   assert.equal(detail.value.token, null);

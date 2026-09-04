@@ -7,7 +7,7 @@ const source = readFileSync(new URL('../src/ui/app.js', import.meta.url), 'utf8'
 function context(pathname = '/') {
   const elements = new Map();
   const context = vm.createContext({document:{querySelector:selector => {
-    if (!elements.has(selector)) elements.set(selector, {hidden:false,innerHTML:'',clientWidth:640,classList:{toggle(){}},replaceChildren(){},append(){}});
+    if (!elements.has(selector)) elements.set(selector, {hidden:false,innerHTML:'',clientWidth:640,classList:{toggle(){}},querySelector(){return null;},replaceChildren(){},append(){}});
     return elements.get(selector);
   }},location:{pathname},AbortController});
   vm.runInContext(source.slice(0, source.indexOf('for (const button of')), context);
@@ -86,13 +86,87 @@ test('details use compact system labels without removing monthly or other metric
   assert.ok(html.includes('<dt>Swap</dt><dd>0 B / 0 B</dd>'));
   assert.ok(!html.includes('bookworm') && !html.includes('GNU/Linux') && !html.includes('UTC'));
 });
-test('latency headings stay compact but selections remain scoped to the configured target', () => {
+test('latency renders once, reuses its controls and scopes selections to all configured targets', () => {
   const sandbox = context('/node/n');
-  vm.runInContext('const calls=[];chart=(title,points,series,maximum,selectionKey)=>{calls.push({title,selectionKey});return {};};activeTab="latency";historyData={latency:[{at:100}],targets:{telecom:"old.example:80",unicom:"u.example:80",mobile:"m.example:80"}};drawHistory();historyData.targets.telecom="new.example:80";drawHistory()', sandbox);
-  const calls = JSON.parse(vm.runInContext('JSON.stringify(calls)', sandbox));
-  assert.deepEqual(calls.map(call=>call.title), ['电信','联通','移动','电信','联通','移动']);
-  assert.equal(calls[0].selectionKey, 'telecom:old.example:80');
-  assert.equal(calls[3].selectionKey, 'telecom:new.example:80');
+  vm.runInContext(`const calls=[]; let current=null;
+    const root=document.querySelector('#charts'); root.querySelector=()=>current;
+    root.replaceChildren=(node)=>{current=node;calls.push('swap');};
+    latencyChart=()=>({dataset:{scope:latencyScope()},updateHistory:()=>calls.push('update')});
+    activeTab='latency';historyData={latency:[{at:100}],targets:{telecom:'old.example:80'}};
+    drawHistory(); const oldScope=current.dataset.scope; drawHistory();
+    historyData.targets.telecom='new.example:80';drawHistory();`, sandbox);
+  assert.equal(vm.runInContext('JSON.stringify(calls)', sandbox), '["swap","update","swap"]');
+  assert.notEqual(vm.runInContext('oldScope', sandbox), vm.runInContext('current.dataset.scope', sandbox));
+  assert.equal(vm.runInContext('latencySeries.map(s=>s.label).join(",")', sandbox), '电信,联通,移动');
+});
+
+test('history is built before one atomic swap and height-only resizes do not redraw', () => {
+  const sandbox = context('/node/n');
+  vm.runInContext(`const operations=[];const root=document.querySelector('#charts');
+    root.replaceChildren=(...nodes)=>operations.push('swap:'+nodes.length);
+    chart=()=>{operations.push('build');return {};};historyData={resources:[{at:100}]};
+    drawHistory();resizeHistory();`, sandbox);
+  assert.equal(vm.runInContext('operations.join(",")', sandbox), 'build,build,build,build,swap:4');
+  vm.runInContext('root.clientWidth=390;resizeHistory()', sandbox);
+  assert.equal(vm.runInContext('operations.filter(x=>x==="swap:4").length', sandbox), 2);
+  assert.ok(!source.includes('setTimeout(drawHistory, 150)'));
+});
+
+test('zoom uses absolute time, clamps expired windows and never exceeds the query range', () => {
+  const sandbox = context();
+  for (const [window, expected] of [[null,{from:100,to:700}],[{from:300,to:400},{from:300,to:400}],[{from:0,to:200},{from:100,to:300}],[{from:650,to:850},{from:500,to:700}],[{from:300,to:301},{from:300,to:330}]]) {
+    sandbox.window = window;
+    assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(latencyRange({from:100,to:700,step:30},window))', sandbox)), expected);
+  }
+});
+
+test('peak clipping only caps the viewport per carrier and preserves raw readings and failures', () => {
+  const sandbox = context();
+  vm.runInContext(`const points=Array.from({length:20},(_,i)=>Object.freeze({telecom:i===19?1200:i===0?null:30+i%3,unicom:200+i%3,mobile:0}));
+    const full=latencyScale(points,latencySeries,false), clipped=latencyScale(points,latencySeries,true);`, sandbox);
+  assert.ok(vm.runInContext('full.max>=1200 && clipped.max<1200 && clipped.max>=202 && clipped.min===0', sandbox));
+  assert.equal(vm.runInContext('chartReading(points[19],latencySeries[0])', sandbox), '电信：1200 ms');
+  assert.equal(vm.runInContext('chartValue(points[0],latencySeries[0])', sandbox), null);
+  assert.ok(vm.runInContext('latencyScale([],latencySeries,true).max>0', sandbox));
+  assert.ok(vm.runInContext('latencyScale([{telecom:0}],latencySeries,true).max>0', sandbox));
+  assert.ok(vm.runInContext('latencyScale(points,[],true).ticks.every(Number.isFinite)', sandbox));
+});
+
+test('background history errors preserve existing charts instead of collapsing the document', async () => {
+  const sandbox = context('/node/n');
+  sandbox.fetch = async () => {throw new Error('network unavailable');};
+  vm.runInContext('historyData={resources:[{at:100}]};document.querySelector("#charts").innerHTML="existing";', sandbox);
+  await vm.runInContext('loadHistory()', sandbox);
+  assert.equal(vm.runInContext('document.querySelector("#charts").innerHTML', sandbox), 'existing');
+});
+
+test('combined renderer keeps three line styles, null gaps and shared keyboard selection without inline styles', () => {
+  const sandbox = context();
+  const element = () => ({style:{},hidden:false,attributes:{},clientWidth:640,offsetWidth:150,
+    setAttribute(key,value){this.attributes[key]=value;},removeAttribute(key){delete this.attributes[key];}});
+  const svg = element(), tooltip = element(), cursor = element(), line = element(), dots = [element(),element(),element()];
+  svg.events = {}; svg.addEventListener = (key,fn)=>{svg.events[key]=fn;};
+  svg.getBoundingClientRect = ()=>({left:0,width:640});
+  const block = element();
+  block.querySelector = key=>({'svg':svg,'.chart-tooltip':tooltip,'.chart-cursor':cursor,'.cursor-line':line}[key]);
+  block.querySelectorAll = ()=>dots;
+  sandbox.document.createElement = ()=>block;
+  vm.runInContext(`historyData={from:100,to:400,step:100};
+    const points=[{at:100,telecom:20,unicom:30,mobile:40},{at:200,telecom:null,unicom:31,mobile:0},{at:300,telecom:22,unicom:32,mobile:42}];
+    chart('网络延迟',points,latencySeries,undefined,'combined',{width:640,latency:true,format:milliseconds});`, sandbox);
+  for (const style of ['primary','secondary','tertiary']) assert.ok(block.innerHTML.includes('line '+style));
+  assert.equal((block.innerHTML.match(/class="line primary"/g)||[]).length,2,'Null points must split the line');
+  assert.ok(!block.innerHTML.includes('class="area"') && !block.innerHTML.includes(' style='));
+  assert.equal(svg.style.height,'400px');
+  svg.events.keydown({key:'ArrowRight',preventDefault(){}});
+  assert.ok(tooltip.textContent.includes('联通：31 ms') && tooltip.textContent.includes('移动：0 ms'));
+  assert.ok(!tooltip.textContent.includes('电信：') && !tooltip.textContent.includes('失败'));
+  assert.equal(vm.runInContext('chartSelections.get("combined")',sandbox),200);
+  svg.events.keydown({key:'ArrowRight',preventDefault(){}});
+  for (const label of ['电信：22 ms','联通：32 ms','移动：42 ms']) assert.ok(tooltip.textContent.includes(label));
+  svg.events.keydown({key:'Escape',preventDefault(){}});
+  assert.equal(tooltip.hidden,true);
+  assert.equal(vm.runInContext('chartSelections.has("combined")',sandbox),false);
 });
 test('chart hit testing does not invent readings inside missing history', () => {
   const sandbox = context();

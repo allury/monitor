@@ -10,6 +10,7 @@ server_url=
 token=
 update_only=false
 update_dir=
+credential_dir=
 
 usage() {
     echo "用法: $0 [--binary 文件] --server http(s)://主控地址 [--token 节点密钥]" >&2
@@ -38,6 +39,10 @@ download_file() {
 }
 
 cleanup() {
+    if [ -n "$credential_dir" ]; then
+        rm -f -- "$credential_dir/token"
+        rmdir -- "$credential_dir" 2>/dev/null || true
+    fi
     if [ -n "$update_dir" ]; then
         rm -f -- "$update_dir/next" "$update_dir/previous"
         rmdir -- "$update_dir" 2>/dev/null || true
@@ -235,10 +240,24 @@ if [ -z "$token" ]; then
     exit 1
 fi
 
-install -m 0755 "$binary_path" /usr/local/bin/monitor-agent
+if [ -L /etc/monitor-agent.token ] || { [ -e /etc/monitor-agent.token ] && [ ! -f /etc/monitor-agent.token ]; }; then
+    echo "密钥路径不是普通文件，未更改安装。" >&2
+    exit 1
+fi
+for command_name in mktemp mv chown; do
+    require_command "$command_name"
+done
+# Replace atomically with a new root-owned 0600 file. A redirection into an
+# existing file preserves its old (possibly world-readable) permissions.
 umask 077
-printf '%s\n' "$token" > /etc/monitor-agent.token
+credential_dir=$(mktemp -d /etc/.monitor-agent-credential.XXXXXX)
+printf '%s\n' "$token" > "$credential_dir/token"
+chown 0:0 "$credential_dir/token"
+install -m 0755 "$binary_path" /usr/local/bin/monitor-agent
+mv -f -- "$credential_dir/token" /etc/monitor-agent.token
 unset token
+rmdir -- "$credential_dir"
+credential_dir=
 
 cat > /etc/systemd/system/monitor-agent.service <<UNIT
 [Unit]

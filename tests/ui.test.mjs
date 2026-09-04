@@ -50,6 +50,15 @@ test('chart hit testing does not invent readings inside missing history', () => 
   assert.equal(vm.runInContext('chartHit([{at:100},{at:160},{at:400}], 280, 60)', sandbox), -1);
   assert.equal(vm.runInContext('nearestPoint([], 0)', sandbox), -1);
 });
+test('chart readings omit interaction hints and zero-failure clutter but retain real failures', () => {
+  const sandbox = context();
+  vm.runInContext('const series={key:"telecom",label:"电信",format:v=>Number.isFinite(v)?v.toFixed(1)+" ms":"失败",failure:"telecom_failures"}', sandbox);
+  assert.equal(vm.runInContext('chartReading({telecom:32,telecom_failures:0,count:4},series)', sandbox), '电信：32.0 ms');
+  assert.equal(vm.runInContext('chartReading({telecom:32,telecom_failures:1,count:4},series)', sandbox), '电信：32.0 ms · 失败 1/4');
+  assert.equal(vm.runInContext('chartReading({telecom:null,telecom_failures:4,count:4},series)', sandbox), '电信：失败 4/4');
+  assert.equal(vm.runInContext('chartReading({cpu:0},{key:"cpu",label:"CPU",format:pct})', sandbox), 'CPU：0.0%');
+  assert.ok(!source.includes('已固定'));
+});
 test('untrusted node text is escaped in cards and details', () => {
   const sandbox = context();
   const html = vm.runInContext('card({name:"<img src=x onerror=alert(1)>",os:"<script>bad</script>",cpu_cores:1,metrics:{},month_rx:0,month_tx:0,total_rx:0,total_tx:0})', sandbox);
@@ -62,6 +71,12 @@ test('stale browser data never continues to label nodes online', () => {
   vm.runInContext('payload={generated_at:Date.now()/1000}; receivedAt=Date.now()-13000', sandbox);
   assert.equal(vm.runInContext('isOnline({online:true,last_seen:Date.now()/1000})', sandbox), false);
   assert.ok(vm.runInContext('status({online:true})', sandbox).includes('数据过期'));
+});
+test('page-level update timestamp is removed without removing node freshness checks', () => {
+  const template = readFileSync(new URL('../src/ui/index.html', import.meta.url), 'utf8');
+  assert.ok(!template.includes('updated-at'));
+  assert.ok(!source.includes('updated-at'));
+  assert.ok(source.includes('isStale()'));
 });
 test('malformed detail links do not crash the page', () => {
   assert.equal(vm.runInContext('detailId', context('/node/%E0%A4%A')), '%E0%A4%A');

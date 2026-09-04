@@ -40,7 +40,17 @@ curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-ag
 
 ### 更新
 
-重新执行对应的安装命令即可。主控保留数据库和管理员密钥；通过 IP 直接测试的主控更新时仍需带上 `--public`，否则会恢复为仅监听本机。探针更新时使用该节点的上报地址和密钥。
+主控重新执行安装命令，保留数据库和管理员密钥；通过 IP 直接测试的主控更新时仍需带上 `--public`，否则会恢复为仅监听本机。
+
+已安装的探针在后台点击“安装 / 更新”复制更新命令，或执行：
+
+```sh
+curl -fsSL https://github.com/allury/monitor/releases/latest/download/install-agent.sh | sudo sh -s -- --update
+```
+
+也可将 `curl -fsSL` 换为 `wget -qO-`。更新只替换程序并重启，保留原地址、密钥和服务配置，不需要重新获取或重置密钥。首次安装或更换上报地址时，使用完整安装命令。
+
+主控只保存密钥摘要，无法再次显示原密钥。新机器安装且未保存原密钥时，可在后台重置；原密钥会立即失效。
 
 更新顺序为先主控、后探针。更新前备份主控数据库。安装命令下载[最近正式版](https://github.com/allury/monitor/releases/latest)，不包含尚未发布的源码改动。
 

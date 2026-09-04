@@ -94,7 +94,6 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
 .empty-card { grid-column:1/-1; padding:3rem 1rem; text-align:center; }
 .empty-card h2 { font-size:1rem; font-weight:550; margin:0 0 .4rem; }
 .empty-card p { font-size:.875rem; margin:0; color:var(--muted-foreground); }
-.updated-at { min-height:1.2rem; text-align:right; font-size:.75rem; color:var(--muted-foreground); margin:1rem 0; }
 .footer { color:var(--muted-foreground); text-align:center; font-size:.8125rem; padding-block:.5rem 1.5rem; }
 .back-link { display:inline-block; font-size:.8125rem; color:var(--muted-foreground); text-decoration:none; margin-bottom:.65rem; }
 .detail-title { display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; }
@@ -114,6 +113,7 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
 .chart-legend span::before { content:""; display:inline-block; width:1rem; margin-right:.3rem; border-top:2px solid var(--foreground); vertical-align:middle; }
 .chart-legend .secondary::before { border-top-style:dashed; }
 .chart { width:100%; height:10.5rem; overflow:visible; touch-action:pan-y; cursor:crosshair; }
+.chart:focus-visible { outline:1px solid var(--muted-foreground); outline-offset:3px; border-radius:.2rem; }
 .chart text { fill:var(--muted-foreground); font:12px ui-sans-serif,system-ui,sans-serif; }
 .chart .grid-line { stroke:var(--border); stroke-width:1; stroke-dasharray:3 4; }
 .chart .line { fill:none; stroke:var(--foreground); stroke-width:1.4; vector-effect:non-scaling-stroke; }
@@ -209,5 +209,10 @@ progress::-moz-progress-bar { border-radius:99px; background:var(--foreground); 
   .tabs { overflow-x:auto; }
   .chart { height:10rem; }
 }
-@media (max-width:380px) { .detail-facts { grid-template-columns:1fr; } .summary-card .duplex { grid-template-columns:1fr; } }
+@media (max-width:480px) {
+  .summary-card .duplex { grid-template-columns:1fr; gap:.1rem; }
+  .overview { grid-auto-rows:1fr; }
+  .node-card .metric-sub { white-space:normal; overflow:visible; }
+}
+@media (max-width:380px) { .detail-facts { grid-template-columns:1fr; } }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none !important; scroll-behavior:auto !important; } }

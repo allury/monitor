@@ -638,6 +638,32 @@ mod tests {
     }
 
     #[test]
+    fn legacy_default_footer_is_hidden_but_custom_footer_is_retained() {
+        let (_dir, path, _node) = fixture();
+        assert!(load_settings(&open(&path).unwrap())
+            .unwrap()
+            .site
+            .footer
+            .is_empty());
+        let mut site = SiteSettings {
+            footer: "只读状态页 · 数据每 2 秒刷新".to_owned(),
+            ..SiteSettings::default()
+        };
+        save_site(&path, &site).unwrap();
+        assert!(load_settings(&open(&path).unwrap())
+            .unwrap()
+            .site
+            .footer
+            .is_empty());
+        site.footer = "Custom footer".to_owned();
+        save_site(&path, &site).unwrap();
+        assert_eq!(
+            load_settings(&open(&path).unwrap()).unwrap().site.footer,
+            "Custom footer"
+        );
+    }
+
+    #[test]
     fn duplicate_node_does_not_rotate_credentials() {
         let (_dir, path, node) = fixture();
         assert!(create_node(&path, "n", "Other").is_err());

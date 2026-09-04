@@ -128,8 +128,6 @@ function render() {
   $("#site-description").hidden = !site.description || !!detailId;
   $(".footer").textContent = site.footer || "";
   $(".footer").hidden = !site.footer?.trim();
-  const updated = new Date(payload.generated_at * 1000).toLocaleTimeString("zh-CN", {hour12:false});
-  $("#updated-at").textContent = isStale() ? "连接已断开 · 保留 " + updated + " 的数据" : updated + " 更新";
   if (detailId) {
     const node = nodes.find(n => n.id === detailId);
     if (node) {
@@ -177,6 +175,12 @@ function nearestPoint(points, at) {
 function chartHit(points, at, step) {
   const index = nearestPoint(points, at);
   return index >= 0 && Math.abs(points[index].at - at) <= step * .75 ? index : -1;
+}
+function chartReading(point, series) {
+  const value = point[series.key];
+  const failure = series.failure && point[series.failure] > 0 ? "失败 " + point[series.failure] + "/" + point.count : "";
+  const reading = failure && !Number.isFinite(value) ? failure : series.format(value) + (failure ? " · " + failure : "");
+  return series.label + "：" + reading;
 }
 function chart(title, points, series, maximum) {
   const width = Math.max(280, $("#charts").clientWidth), height = 168, left = width < 500 ? 58 : 72, right = width - 8, top = 10, bottom = 138;
@@ -230,7 +234,7 @@ function chart(title, points, series, maximum) {
       } else dot.setAttribute("hidden", "");
     });
     tooltip.hidden = false;
-    tooltip.textContent = new Date(at * 1000).toLocaleString("zh-CN", {hour12:false}) + "\n" + (point ? series.map(s => s.label + "：" + s.format(point[s.key]) + (s.failure ? " · 失败 " + point[s.failure] + "/" + point.count : "")).join("\n") : "此时间暂无记录") + (pinned ? "\n已固定 · 再点一次或按 Esc 取消" : "");
+    tooltip.textContent = new Date(at * 1000).toLocaleString("zh-CN", {hour12:false}) + "\n" + (point ? series.map(s => chartReading(point, s)).join("\n") : "此时间暂无记录");
     tooltip.style.left = Math.max(0, Math.min(el.clientWidth - tooltip.offsetWidth, xx / width * svg.clientWidth + 12)) + "px";
   };
   const position = e => {

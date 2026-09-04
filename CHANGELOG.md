@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 - Unreleased
+## 0.3.0 - 2026-09-04
 
 ### Added
 
@@ -14,6 +14,8 @@
 - Aligned navigation, overview and four-column node cards with the reference layout.
 - Shortened system labels and standardized resource/transfer units; preserved monthly traffic markup and binary units.
 - Made the default footer empty while retaining the optional setting.
+- Simplified chart tooltips, showing failure counts only when failures occur.
+- Removed the page-level update timestamp while retaining node freshness indicators.
 
 ### Fixed
 

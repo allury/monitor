@@ -1,71 +1,57 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="light dark" />
-    <meta name="description" content="克制、只读的服务器状态页" />
-    <link rel="icon" href="/favicon.svg" />
-    <link rel="stylesheet" href="/assets/app.css" />
-    <title>Monitor</title>
-  </head>
-  <body>
-    <header class="site-header">
-      <div class="shell header-inner">
-        <a class="brand" href="/" aria-label="Monitor 首页">
-          <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M3 13h4l2-7 4 13 2-6h6" /></svg>
-          </span>
-          <span>Monitor</span>
-        </a>
-        <div class="header-actions">
-          <span class="connection" id="connection"><i></i><span>连接中</span></span>
-          <a class="admin-link" href="/admin">管理</a>
-          <button class="icon-button" id="theme-toggle" type="button" aria-label="切换主题">
-            <svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/></svg>
-            <svg class="moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
-          </button>
-        </div>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="服务器状态">
+  <link rel="icon" href="/favicon.svg">
+  <script src="/assets/theme.js"></script>
+  <link rel="stylesheet" href="/assets/app.css">
+  <title>Monitor</title>
+</head>
+<body>
+  <header class="site-header">
+    <div class="shell header-inner">
+      <a class="brand" href="/"><span>Monitor</span></a>
+      <div class="header-actions">
+        <span class="connection" id="connection" role="status"><i></i><span>连接中</span></span>
+        <a class="admin-link" href="/admin">管理</a>
+        <button class="icon-button" id="theme-toggle" type="button" aria-label="切换主题">
+          <svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M5 5l1.5 1.5M17.5 17.5L19 19M2 12h2M20 12h2M5 19l1.5-1.5M17.5 6.5L19 5"/></svg>
+          <svg class="moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+        </button>
       </div>
-    </header>
-
-    <main class="shell">
+    </div>
+  </header>
+  <main class="shell">
+    <p id="site-description" class="site-description" hidden></p>
+    <section id="home-view">
+      <h1 class="sr-only">服务器状态</h1>
       <section class="overview" aria-label="总览">
-        <article class="summary-card">
-          <div class="summary-label"><span>节点</span><span id="offline-label">—</span></div>
-          <div class="summary-value"><strong id="node-count">—</strong><span>台在线</span></div>
-        </article>
-        <article class="summary-card">
-          <div class="summary-label"><span>实时网速</span><span>全节点</span></div>
-          <div class="summary-value compact" id="live-speed">—</div>
-        </article>
-        <article class="summary-card">
-          <div class="summary-label"><span>今日流量</span><span>下行 + 上行</span></div>
-          <div class="summary-value"><strong id="today-traffic">—</strong></div>
-        </article>
-        <article class="summary-card">
-          <div class="summary-label"><span>累计流量</span><span>重启不归零</span></div>
-          <div class="summary-value"><strong id="total-traffic">—</strong></div>
-        </article>
+        <article class="summary-card"><div class="summary-label">节点</div><strong class="summary-number" id="node-count">—</strong><span class="summary-note" id="offline-label">等待数据</span></article>
+        <article class="summary-card"><div class="summary-label">最忙节点</div><strong class="summary-number" id="busy-value">—</strong><span class="summary-note" id="busy-node">—</span></article>
+        <article class="summary-card"><div class="summary-label">今日流量</div><div class="duplex" id="today-traffic">—</div><div class="summary-label secondary-label">总流量</div><div class="duplex" id="total-traffic">—</div></article>
+        <article class="summary-card"><div class="summary-label">实时网速</div><div class="duplex" id="live-speed">—</div></article>
       </section>
-
-      <section class="section-heading">
-        <div>
-          <h1>服务器</h1>
-          <p id="updated-at">等待首次数据</p>
-        </div>
-      </section>
-
-      <div class="node-grid" id="nodes" aria-live="polite">
-        <article class="empty-card">
-          <div class="empty-icon" aria-hidden="true">⌁</div>
-          <h2>正在连接</h2>
-          <p>状态页会在收到快照后自动更新。</p>
-        </article>
-      </div>
-    </main>
-
-    <footer class="shell footer">只读状态页 · 数据每 2 秒刷新</footer>
-    <script src="/assets/app.js" defer></script>
-  </body>
+      <div class="node-grid" id="nodes"><div class="empty-card"><h2>正在连接</h2><p>等待节点数据。</p></div></div>
+    </section>
+    <section id="detail-view" hidden>
+      <a class="back-link" href="/">← 全部节点</a>
+      <div id="node-detail"></div>
+      <nav class="detail-tabs" aria-label="节点详情">
+        <button type="button" class="selected" data-tab="resources" aria-pressed="true">资源</button>
+        <button type="button" data-tab="latency" aria-pressed="false">网络延迟</button>
+      </nav>
+      <nav class="time-ranges" aria-label="历史时间范围">
+        <button type="button" data-hours="1">1 小时</button><button type="button" data-hours="6" class="selected" aria-pressed="true">6 小时</button><button type="button" data-hours="24">24 小时</button><button type="button" data-hours="168">7 天</button><button type="button" data-hours="720">30 天</button>
+      </nav>
+      <p id="history-note" class="muted"></p>
+      <div id="charts" aria-live="polite"></div>
+    </section>
+    <p id="updated-at" class="updated-at" role="status"></p>
+  </main>
+  <footer class="shell footer"></footer>
+  <script src="/assets/app.js" defer></script>
+</body>
 </html>

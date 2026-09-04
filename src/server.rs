@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{DefaultBodyLimit, Path, State, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -23,14 +23,15 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, mpsc, RwLock};
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::sync::{broadcast, mpsc, watch, RwLock, Semaphore};
+use tokio::time::{interval, timeout, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::db;
 use crate::model::{
-    AgentReport, AppSettings, HealthResponse, LatencyTargets, NodeView, PersistEvent,
-    ServerMessage, SiteSettings, StatusResponse, StoredNode, PROTOCOL_VERSION,
+    network_delta, valid_target, AgentReport, AppSettings, HealthResponse, LatencyTargets,
+    NodeView, PersistEvent, ServerMessage, SiteSettings, StatusResponse, StoredNode,
+    PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone)]
@@ -44,17 +45,21 @@ struct AppState {
     nodes: Arc<RwLock<HashMap<String, StoredNode>>>,
     snapshot: Arc<RwLock<Arc<str>>>,
     broadcast: broadcast::Sender<Arc<str>>,
-    agent_config: broadcast::Sender<LatencyTargets>,
+    agent_config: watch::Sender<(LatencyTargets, u64)>,
     reports: mpsc::Sender<IncomingReport>,
     database: PathBuf,
     admin_hash: Arc<Vec<u8>>,
     sessions: Arc<RwLock<HashMap<String, Instant>>>,
     settings: Arc<RwLock<AppSettings>>,
+    shutdown: watch::Receiver<bool>,
+    history_slots: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
 struct IncomingReport {
     node_id: String,
+    connection_id: u64,
+    token_hash: Vec<u8>,
     report: AgentReport,
 }
 
@@ -83,16 +88,27 @@ pub async fn run(options: ServerOptions) -> Result<()> {
     };
     let snapshot = Arc::new(RwLock::new(initial));
     let (broadcast, _) = broadcast::channel::<Arc<str>>(16);
-    let (agent_config, _) = broadcast::channel::<LatencyTargets>(8);
+    let (agent_config, _) = watch::channel({
+        let settings = settings.read().await;
+        (settings.latency.clone(), settings.latency_revision)
+    });
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (reports_tx, reports_rx) = mpsc::channel::<IncomingReport>(4096);
-    let persist_tx = start_database_writer(options.database.clone())?;
+    let (persist_tx, database_worker) =
+        start_database_writer(options.database.clone(), shutdown_tx.clone())?;
 
-    tokio::spawn(process_reports(nodes.clone(), reports_rx, persist_tx));
-    tokio::spawn(refresh_snapshots(
+    let report_worker = tokio::spawn(process_reports(
+        nodes.clone(),
+        settings.clone(),
+        reports_rx,
+        persist_tx,
+    ));
+    let snapshot_worker = tokio::spawn(refresh_snapshots(
         nodes.clone(),
         snapshot.clone(),
         broadcast.clone(),
         settings.clone(),
+        shutdown_rx.clone(),
     ));
 
     let state = AppState {
@@ -105,16 +121,21 @@ pub async fn run(options: ServerOptions) -> Result<()> {
         admin_hash,
         sessions: Arc::new(RwLock::new(HashMap::new())),
         settings,
+        shutdown: shutdown_rx.clone(),
+        history_slots: Arc::new(Semaphore::new(4)),
     };
     let app = Router::new()
         .route("/", get(index))
+        .route("/node/{id}", get(index))
         .route("/admin", get(admin))
         .route("/assets/app.css", get(styles))
         .route("/assets/app.js", get(script))
         .route("/assets/admin.js", get(admin_script))
+        .route("/assets/theme.js", get(theme_script))
         .route("/favicon.svg", get(favicon))
         .route("/api/health", get(health))
         .route("/api/nodes", get(nodes_api))
+        .route("/api/nodes/{id}/history", get(history_api))
         .route("/api/ws", get(browser_socket))
         .route("/api/agent", get(agent_socket))
         .route("/api/admin/login", post(admin_login))
@@ -122,6 +143,7 @@ pub async fn run(options: ServerOptions) -> Result<()> {
         .route("/api/admin/state", get(admin_state))
         .route("/api/admin/nodes", post(admin_create_node))
         .route("/api/admin/nodes/{id}", delete(admin_revoke_node))
+        .route("/api/admin/nodes/{id}/token", post(admin_rotate_token))
         .route("/api/admin/latency", put(admin_save_latency))
         .route("/api/admin/site", put(admin_save_site))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -131,26 +153,35 @@ pub async fn run(options: ServerOptions) -> Result<()> {
         .await
         .with_context(|| format!("无法监听 {}", options.listen))?;
     info!(listen = %options.listen, database = %options.database.display(), node_count, "控制端已启动");
+    let mut stop = shutdown_rx;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            tokio::select! { _ = shutdown_signal() => {}, _ = stop.changed() => {} }
+            let _ = shutdown_tx.send(true);
+        })
         .await?;
+    report_worker.await.context("上报处理线程退出失败")?;
+    snapshot_worker.await.context("快照线程退出失败")?;
+    tokio::task::spawn_blocking(move || {
+        database_worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("数据库线程异常退出"))
+    })
+    .await???;
     Ok(())
 }
 
-fn start_database_writer(path: PathBuf) -> Result<SyncSender<PersistEvent>> {
-    let (sender, receiver) = sync_channel::<PersistEvent>(8192);
-    thread::Builder::new()
+fn start_database_writer(
+    path: PathBuf,
+    shutdown: watch::Sender<bool>,
+) -> Result<(mpsc::Sender<PersistEvent>, thread::JoinHandle<Result<()>>)> {
+    let (sender, mut receiver) = mpsc::channel::<PersistEvent>(8192);
+    let mut connection = db::open(&path)?;
+    let worker = thread::Builder::new()
         .name("monitor-db".to_owned())
         .spawn(move || {
-            let mut connection = match db::open(&path) {
-                Ok(connection) => connection,
-                Err(error) => {
-                    error!(%error, "数据库线程启动失败");
-                    return;
-                }
-            };
             let mut last_prune = 0_i64;
-            while let Ok(first) = receiver.recv() {
+            while let Some(first) = receiver.blocking_recv() {
                 let mut batch = Vec::with_capacity(256);
                 batch.push(first);
                 while batch.len() < 512 {
@@ -159,8 +190,19 @@ fn start_database_writer(path: PathBuf) -> Result<SyncSender<PersistEvent>> {
                         Err(_) => break,
                     }
                 }
-                if let Err(error) = db::persist_batch(&mut connection, &batch) {
-                    error!(%error, count = batch.len(), "写入监控数据失败");
+                let mut stopping_since = None;
+                loop {
+                    match db::persist_batch(&mut connection, &batch) {
+                        Ok(()) => break,
+                        Err(error) => {
+                            error!(%error, count = batch.len(), "写入失败，保留原批次重试；队列满时暂停接收");
+                            if *shutdown.borrow() {
+                                let since = stopping_since.get_or_insert_with(Instant::now);
+                                if since.elapsed() >= Duration::from_secs(20) { return Err(error.context("停止前仍无法落盘，存在未持久化数据")); }
+                            }
+                            thread::sleep(Duration::from_secs(1));
+                        }
+                    }
                 }
                 let now = Utc::now().timestamp();
                 if now - last_prune >= 3600 {
@@ -170,38 +212,56 @@ fn start_database_writer(path: PathBuf) -> Result<SyncSender<PersistEvent>> {
                     last_prune = now;
                 }
             }
+            Ok(())
         })
         .context("无法启动数据库线程")?;
-    Ok(sender)
+    Ok((sender, worker))
 }
 
 async fn process_reports(
     nodes: Arc<RwLock<HashMap<String, StoredNode>>>,
+    settings: Arc<RwLock<AppSettings>>,
     mut receiver: mpsc::Receiver<IncomingReport>,
-    persist: SyncSender<PersistEvent>,
+    persist: mpsc::Sender<PersistEvent>,
 ) {
     while let Some(incoming) = receiver.recv().await {
         let now = Utc::now();
         let timestamp = now.timestamp();
         let month_key = now.format("%Y-%m").to_string();
         let day_key = now.format("%Y-%m-%d").to_string();
+        let revision = settings.read().await.latency_revision;
         let mut guard = nodes.write().await;
         let Some(node) = guard.get_mut(&incoming.node_id) else {
             continue;
         };
-        let report = incoming.report;
-        let delta_rx = traffic_delta(
-            &node.boot_id,
-            node.last_rx_counter,
-            &report.boot_id,
-            report.metrics.net_rx_total,
-        );
-        let delta_tx = traffic_delta(
-            &node.boot_id,
-            node.last_tx_counter,
-            &report.boot_id,
-            report.metrics.net_tx_total,
-        );
+        if incoming.connection_id != node.connection_id || incoming.token_hash != node.token_hash {
+            continue;
+        }
+        let mut report = incoming.report;
+        let (delta_rx, delta_tx) = report_traffic_delta(node, &report);
+        let previous = node.metrics.as_ref();
+        let latency = report
+            .metrics
+            .latency_sample
+            .as_ref()
+            .filter(|sample| {
+                sample.revision == revision
+                    && previous
+                        .and_then(|m| m.latency_sample.as_ref())
+                        .is_none_or(|old| old.id != sample.id)
+            })
+            .cloned();
+        if let Some(sample) = &latency {
+            report.metrics.latency = sample.values.clone();
+            report.metrics.latency_at = Some(timestamp);
+        } else {
+            // Repeated cached samples and in-flight results from old targets are not new history.
+            report.metrics.latency_sample = previous.and_then(|m| m.latency_sample.clone());
+            report.metrics.latency_at = previous.and_then(|m| m.latency_at);
+            if let Some(previous) = previous {
+                report.metrics.latency = previous.latency.clone();
+            }
+        }
 
         if node.month_key != month_key {
             node.month_key = month_key;
@@ -244,15 +304,44 @@ async fn process_reports(
         let event = PersistEvent {
             node: node.clone(),
             write_sample,
+            latency,
         };
         drop(guard);
 
-        match persist.try_send(event) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => warn!("数据库队列已满，本次快照仅保留在内存中"),
-            Err(TrySendError::Disconnected(_)) => error!("数据库线程已经停止"),
+        if persist.send(event).await.is_err() {
+            error!("数据库线程已经停止，停止接收上报");
+            return;
         }
     }
+}
+
+fn report_traffic_delta(node: &StoredNode, report: &AgentReport) -> (u64, u64) {
+    if node.boot_id.is_empty() {
+        return (0, 0);
+    }
+    if node.boot_id == report.boot_id && !report.metrics.network.is_empty() {
+        return network_delta(
+            node.metrics
+                .as_ref()
+                .map(|m| m.network.as_slice())
+                .unwrap_or_default(),
+            &report.metrics.network,
+        );
+    }
+    (
+        traffic_delta(
+            &node.boot_id,
+            node.last_rx_counter,
+            &report.boot_id,
+            report.metrics.net_rx_total,
+        ),
+        traffic_delta(
+            &node.boot_id,
+            node.last_tx_counter,
+            &report.boot_id,
+            report.metrics.net_tx_total,
+        ),
+    )
 }
 
 fn traffic_delta(previous_boot: &str, previous: u64, boot: &str, current: u64) -> u64 {
@@ -270,11 +359,12 @@ async fn refresh_snapshots(
     snapshot: Arc<RwLock<Arc<str>>>,
     sender: broadcast::Sender<Arc<str>>,
     settings: Arc<RwLock<AppSettings>>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     let mut ticker = interval(Duration::from_secs(2));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        ticker.tick().await;
+        tokio::select! { _ = ticker.tick() => {}, _ = shutdown.changed() => return }
         let site = settings.read().await.site.clone();
         let rendered = {
             let guard = nodes.read().await;
@@ -319,76 +409,128 @@ async fn agent_socket(
     if token.len() > 160 || node_id.len() > 64 {
         return plain(StatusCode::UNAUTHORIZED, "invalid bearer token");
     }
-    let allowed = {
-        let guard = state.nodes.read().await;
-        guard
-            .get(node_id)
-            .map(|node| {
-                let provided = db::token_hash(token);
-                provided.as_slice().ct_eq(node.token_hash.as_slice()).into()
-            })
-            .unwrap_or(false)
-    };
+    let hash = db::token_hash(token);
+    let allowed = state
+        .nodes
+        .read()
+        .await
+        .get(node_id)
+        .is_some_and(|node| bool::from(hash.as_slice().ct_eq(node.token_hash.as_slice())));
     if !allowed {
         return plain(StatusCode::UNAUTHORIZED, "invalid bearer token");
     }
-
     let node_id = node_id.to_owned();
     websocket
         .read_buffer_size(4 * 1024)
         .write_buffer_size(4 * 1024)
+        .max_write_buffer_size(64 * 1024)
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
-        .on_upgrade(move |socket| handle_agent(socket, state, node_id))
+        .on_upgrade(move |socket| handle_agent(socket, state, node_id, hash))
 }
 
-async fn handle_agent(socket: WebSocket, state: AppState, node_id: String) {
-    let (mut writer, mut reader) = socket.split();
-    let initial = state.settings.read().await.latency.clone();
-    if send_targets(&mut writer, initial).await.is_err() {
-        return;
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
+
+async fn handle_agent(socket: WebSocket, state: AppState, node_id: String, token_hash: Vec<u8>) {
+    let connection_id = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
+    let (close_tx, close_rx) = watch::channel(false);
+    {
+        let mut nodes = state.nodes.write().await;
+        let Some(node) = nodes.get_mut(&node_id) else {
+            return;
+        };
+        // Recheck after the upgrade: revocation may have happened since the handshake.
+        if node.token_hash != token_hash || *state.shutdown.borrow() {
+            return;
+        }
+        if let Some(old) = node.close_signal.replace(close_tx) {
+            let _ = old.send(true);
+        }
+        node.connection_id = connection_id;
     }
-    let mut config_updates = state.agent_config.subscribe();
+    if let Err(error) = agent_loop(
+        socket,
+        &state,
+        &node_id,
+        connection_id,
+        &token_hash,
+        close_rx,
+    )
+    .await
+    {
+        tracing::debug!(%error, %node_id, "探针连接结束");
+    }
+    let mut nodes = state.nodes.write().await;
+    if let Some(node) = nodes
+        .get_mut(&node_id)
+        .filter(|node| node.connection_id == connection_id)
+    {
+        node.close_signal = None;
+    }
+}
+
+async fn agent_loop(
+    socket: WebSocket,
+    state: &AppState,
+    node_id: &str,
+    connection_id: u64,
+    token_hash: &[u8],
+    mut close: watch::Receiver<bool>,
+) -> Result<()> {
+    let (mut writer, mut reader) = socket.split();
+    let mut config = state.agent_config.subscribe();
+    let initial = config.borrow_and_update().clone();
+    send_targets(&mut writer, initial).await?;
+    let mut shutdown = state.shutdown.clone();
+    let mut last_report = Instant::now() - Duration::from_secs(1);
     loop {
         tokio::select! {
-            incoming = reader.next() => {
+            _ = shutdown.changed() => break,
+            _ = close.changed() => break,
+            incoming = timeout(Duration::from_secs(15), reader.next()) => {
+                let incoming = incoming.context("探针上报超时")?;
                 let report = match incoming {
-                    Some(Ok(Message::Text(text))) => serde_json::from_str::<AgentReport>(&text),
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                    Some(Ok(Message::Text(text))) => serde_json::from_str::<AgentReport>(&text)?,
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     _ => continue,
                 };
-                let Ok(report) = report else { return };
-                if !valid_report(&report) { return; }
-                if state.reports.send(IncomingReport {
-                    node_id: node_id.clone(),
-                    report,
-                }).await.is_err() {
-                    return;
+                if !valid_report(&report) || last_report.elapsed() < Duration::from_millis(200) { break; }
+                last_report = Instant::now();
+                let incoming = IncomingReport { node_id: node_id.to_owned(), connection_id, token_hash: token_hash.to_vec(), report };
+                tokio::select! {
+                    _ = shutdown.changed() => break,
+                    _ = close.changed() => break,
+                    sent = state.reports.send(incoming) => if sent.is_err() { break; },
                 }
             }
-            update = config_updates.recv() => match update {
-                Ok(targets) => {
-                    if send_targets(&mut writer, targets).await.is_err() { return; }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(_) => return,
+            update = config.changed() => {
+                if update.is_err() { break; }
+                let updated = config.borrow_and_update().clone();
+                send_targets(&mut writer, updated).await?;
             }
         }
     }
+    let _ = timeout(Duration::from_secs(1), writer.close()).await;
+    Ok(())
 }
 
 async fn send_targets(
     writer: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    targets: LatencyTargets,
-) -> Result<(), axum::Error> {
-    let payload = serde_json::to_string(&ServerMessage::LatencyTargets { targets })
-        .expect("序列化固定配置不应失败");
-    writer.send(Message::Text(payload.into())).await
+    (targets, revision): (LatencyTargets, u64),
+) -> Result<()> {
+    let payload = serde_json::to_string(&ServerMessage::LatencyTargets { targets, revision })?;
+    timeout(
+        Duration::from_secs(5),
+        writer.send(Message::Text(payload.into())),
+    )
+    .await??;
+    Ok(())
 }
 
 fn valid_report(report: &AgentReport) -> bool {
     report.protocol == PROTOCOL_VERSION
         && report.agent_version.len() <= 32
+        && !report.boot_id.is_empty()
         && report.boot_id.len() <= 64
         && report.hostname.len() <= 255
         && report.os.len() <= 255
@@ -399,7 +541,31 @@ fn valid_report(report: &AgentReport) -> bool {
         && report.cpu_cores <= 4096
         && report.metrics.cpu.is_finite()
         && (0.0..=100.0).contains(&report.metrics.cpu)
-        && report.metrics.load.iter().all(|value| value.is_finite())
+        && report
+            .metrics
+            .load
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=100_000.0).contains(value))
+        && report.metrics.network.len() <= 64
+        && report.metrics.network.iter().all(|nic| {
+            !nic.name.is_empty()
+                && nic.name.len() <= 32
+                && nic.rx <= i64::MAX as u64
+                && nic.tx <= i64::MAX as u64
+        })
+        && report.metrics.latency_sample.as_ref().is_none_or(|sample| {
+            sample.id > 0
+                && sample.id <= i64::MAX as u64
+                && sample.revision <= i64::MAX as u64
+                && [
+                    sample.values.telecom,
+                    sample.values.unicom,
+                    sample.values.mobile,
+                ]
+                .into_iter()
+                .flatten()
+                .all(|value| value.is_finite() && (0.0..=60_000.0).contains(&value))
+        })
         && [
             report.metrics.latency.telecom,
             report.metrics.latency.unicom,
@@ -453,7 +619,12 @@ async fn admin_login(State(state): State<AppState>, Json(request): Json<LoginReq
         return json_error(StatusCode::UNAUTHORIZED, "管理员密钥错误");
     }
     let token = random_session();
-    state.sessions.write().await.insert(
+    let mut sessions = state.sessions.write().await;
+    sessions.retain(|_, expiry| *expiry > Instant::now());
+    if sessions.len() >= 128 {
+        return json_error(StatusCode::TOO_MANY_REQUESTS, "会话过多，请先退出其他会话");
+    }
+    sessions.insert(
         token.clone(),
         Instant::now() + Duration::from_secs(12 * 3600),
     );
@@ -492,32 +663,29 @@ async fn admin_create_node(
     if !is_admin(&state, &headers).await {
         return json_error(StatusCode::UNAUTHORIZED, "请先登录");
     }
-    let result = (|| -> Result<(String, StoredNode)> {
-        let token = db::create_node(&state.database, &request.id, &request.name)?;
-        let connection = db::open(&state.database)?;
-        let node = db::load_nodes(&connection)?
+    let mut nodes = state.nodes.write().await;
+    let path = state.database.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<(String, StoredNode)> {
+        let token = db::create_node(&path, &request.id, &request.name)?;
+        let node = db::load_nodes(&db::open(&path)?)?
             .into_iter()
             .find(|node| node.id == request.id)
             .context("创建后的节点不存在")?;
         Ok((token, node))
-    })();
+    })
+    .await;
     match result {
-        Ok((token, node)) => {
-            state
-                .nodes
-                .write()
-                .await
-                .insert(node.id.clone(), node.clone());
-            json_value(
-                StatusCode::CREATED,
-                &CreateNodeResponse {
-                    id: node.id,
-                    name: node.name,
-                    token,
-                },
-            )
+        Ok(Ok((token, node))) => {
+            let response = CreateNodeResponse {
+                id: node.id.clone(),
+                name: node.name.clone(),
+                token,
+            };
+            nodes.insert(node.id.clone(), node);
+            json_value(StatusCode::CREATED, &response)
         }
-        Err(error) => json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+        Err(_) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "创建节点失败"),
     }
 }
 
@@ -529,13 +697,54 @@ async fn admin_revoke_node(
     if !is_admin(&state, &headers).await {
         return json_error(StatusCode::UNAUTHORIZED, "请先登录");
     }
-    match db::revoke_node(&state.database, &id) {
-        Ok(true) => {
-            state.nodes.write().await.remove(&id);
+    let mut nodes = state.nodes.write().await;
+    let path = state.database.clone();
+    let key = id.clone();
+    match tokio::task::spawn_blocking(move || db::revoke_node(&path, &key)).await {
+        Ok(Ok(true)) => {
+            if let Some(node) = nodes.remove(&id) {
+                if let Some(close) = node.close_signal {
+                    let _ = close.send(true);
+                }
+            }
             empty(StatusCode::NO_CONTENT)
         }
-        Ok(false) => json_error(StatusCode::NOT_FOUND, "节点不存在"),
-        Err(error) => json_error(StatusCode::BAD_REQUEST, &error.to_string()),
+        Ok(Ok(false)) => json_error(StatusCode::NOT_FOUND, "节点不存在"),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "停用节点失败"),
+    }
+}
+
+async fn admin_rotate_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_admin(&state, &headers).await {
+        return json_error(StatusCode::UNAUTHORIZED, "请先登录");
+    }
+    let mut nodes = state.nodes.write().await;
+    let Some(node) = nodes.get_mut(&id) else {
+        return json_error(StatusCode::NOT_FOUND, "节点不存在");
+    };
+    let path = state.database.clone();
+    let key = id.clone();
+    match tokio::task::spawn_blocking(move || db::rotate_node_token(&path, &key)).await {
+        Ok(Ok(Some(token))) => {
+            if let Some(close) = node.close_signal.take() {
+                let _ = close.send(true);
+            }
+            node.connection_id = 0;
+            node.token_hash = db::token_hash(&token);
+            json_value(
+                StatusCode::OK,
+                &CreateNodeResponse {
+                    id,
+                    name: node.name.clone(),
+                    token,
+                },
+            )
+        }
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "重置密钥失败"),
     }
 }
 
@@ -550,11 +759,17 @@ async fn admin_save_latency(
     if !valid_targets(&targets) {
         return json_error(StatusCode::BAD_REQUEST, "地址必须为有效的 host:port");
     }
-    if let Err(error) = db::save_latency(&state.database, &targets) {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
-    }
-    state.settings.write().await.latency = targets.clone();
-    let _ = state.agent_config.send(targets.clone());
+    let mut settings = state.settings.write().await;
+    let path = state.database.clone();
+    let values = targets.clone();
+    let revision = match tokio::task::spawn_blocking(move || db::save_latency(&path, &values)).await
+    {
+        Ok(Ok(revision)) => revision,
+        _ => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "保存延迟地址失败"),
+    };
+    settings.latency = targets.clone();
+    settings.latency_revision = revision;
+    state.agent_config.send_replace((targets.clone(), revision));
     json_value(StatusCode::OK, &targets)
 }
 
@@ -578,26 +793,23 @@ async fn admin_save_site(
     {
         return json_error(StatusCode::BAD_REQUEST, "站点文字超出长度限制");
     }
-    if let Err(error) = db::save_site(&state.database, &site) {
-        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+    let mut settings = state.settings.write().await;
+    let path = state.database.clone();
+    let value = site.clone();
+    if !matches!(
+        tokio::task::spawn_blocking(move || db::save_site(&path, &value)).await,
+        Ok(Ok(()))
+    ) {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "保存站点设置失败");
     }
-    state.settings.write().await.site = site.clone();
+    settings.site = site.clone();
     json_value(StatusCode::OK, &site)
 }
 
 fn valid_targets(targets: &LatencyTargets) -> bool {
     [&targets.telecom, &targets.unicom, &targets.mobile]
         .into_iter()
-        .all(|target| {
-            !target.is_empty()
-                && target.len() <= 255
-                && !target
-                    .chars()
-                    .any(|character| character.is_whitespace() || "/?#".contains(character))
-                && target.rsplit_once(':').is_some_and(|(host, port)| {
-                    !host.is_empty() && port.parse::<u16>().is_ok_and(|value| value > 0)
-                })
-        })
+        .all(|target| valid_target(target))
 }
 
 async fn is_admin(state: &AppState, headers: &HeaderMap) -> bool {
@@ -631,19 +843,24 @@ async fn browser_socket(State(state): State<AppState>, websocket: WebSocketUpgra
 async fn handle_browser(socket: WebSocket, state: AppState) {
     let (mut writer, mut reader) = socket.split();
     let initial = state.snapshot.read().await.clone();
-    if writer
-        .send(Message::Text(initial.to_string().into()))
-        .await
-        .is_err()
-    {
+    if !matches!(
+        timeout(
+            Duration::from_secs(5),
+            writer.send(Message::Text(initial.to_string().into()))
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
         return;
     }
     let mut receiver = state.broadcast.subscribe();
+    let mut shutdown = state.shutdown.clone();
     loop {
         tokio::select! {
+            _ = shutdown.changed() => return,
             update = receiver.recv() => match update {
                 Ok(payload) => {
-                    if writer.send(Message::Text(payload.to_string().into())).await.is_err() {
+                    if !matches!(timeout(Duration::from_secs(5), writer.send(Message::Text(payload.to_string().into()))).await, Ok(Ok(()))) {
                         return;
                     }
                 }
@@ -660,6 +877,44 @@ async fn handle_browser(socket: WebSocket, state: AppState) {
 
 async fn nodes_api(State(state): State<AppState>) -> Response {
     json_response(state.snapshot.read().await.to_string())
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    hours: Option<u32>,
+    kind: Option<String>,
+}
+
+async fn history_api(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+) -> Response {
+    let hours = query.hours.unwrap_or(6);
+    let kind = query.kind.as_deref().unwrap_or("resources");
+    if !(1..=720).contains(&hours) || !matches!(kind, "resources" | "latency") {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "历史范围为 1–720 小时，类型为 resources 或 latency",
+        );
+    }
+    if !state.nodes.read().await.contains_key(&id) {
+        return json_error(StatusCode::NOT_FOUND, "节点不存在或已停用");
+    }
+    let Ok(permit) = state.history_slots.clone().try_acquire_owned() else {
+        return json_error(StatusCode::TOO_MANY_REQUESTS, "历史查询繁忙，请稍后重试");
+    };
+    let path = state.database.clone();
+    let latency = kind == "latency";
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        db::history(&path, &id, hours, latency, Utc::now().timestamp())
+    })
+    .await
+    {
+        Ok(Ok(history)) => json_value(StatusCode::OK, &history),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "历史读取失败"),
+    }
 }
 
 async fn health() -> impl IntoResponse {
@@ -692,6 +947,13 @@ async fn admin_script() -> Response {
     )
 }
 
+async fn theme_script() -> Response {
+    static_response(
+        "text/javascript; charset=utf-8",
+        include_str!("ui/theme.js"),
+    )
+}
+
 async fn favicon() -> Response {
     static_response(
         "image/svg+xml",
@@ -704,10 +966,9 @@ fn static_response(content_type: &'static str, content: &'static str) -> Respons
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response.headers_mut().insert(
-        CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600"),
-    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     security_headers(response.headers_mut());
     response
 }
@@ -850,5 +1111,44 @@ mod tests {
         assert_eq!(traffic_delta("boot-a", 50_000, "boot-a", 51_250), 1_250);
         assert_eq!(traffic_delta("boot-a", 51_250, "boot-b", 400), 400);
         assert_eq!(traffic_delta("boot-b", 400, "boot-b", 100), 0);
+    }
+
+    #[tokio::test]
+    async fn queued_old_connection_and_repeated_latency_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let token = db::create_node(&path, "n", "Node").unwrap();
+        let mut node = db::load_nodes(&db::open(&path).unwrap()).unwrap().remove(0);
+        node.connection_id = 2;
+        let nodes = Arc::new(RwLock::new(HashMap::from([("n".into(), node)])));
+        let (tx, rx) = mpsc::channel(4);
+        let (persist, mut events) = mpsc::channel(4);
+        let task = tokio::spawn(process_reports(
+            nodes.clone(),
+            Arc::new(RwLock::new(AppSettings::default())),
+            rx,
+            persist,
+        ));
+        for connection_id in [1, 2, 2] {
+            let mut report = report();
+            report.metrics.latency_sample = Some(crate::model::LatencySample {
+                id: 1,
+                revision: 0,
+                values: Latency::default(),
+            });
+            tx.send(IncomingReport {
+                node_id: "n".into(),
+                connection_id,
+                token_hash: db::token_hash(&token),
+                report,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        task.await.unwrap();
+        assert!(events.recv().await.unwrap().latency.is_some());
+        assert!(events.recv().await.unwrap().latency.is_none());
+        assert!(events.recv().await.is_none());
     }
 }

@@ -41,6 +41,8 @@ function showLogin() {
   loginView.classList.remove("hidden");
   adminView.classList.add("hidden");
   logoutButton.classList.add("hidden");
+  document.querySelector("#node-install-command").textContent = "";
+  document.querySelector("#token-box").classList.remove("show");
 }
 
 function showAdmin() {
@@ -66,13 +68,14 @@ function renderNodes(nodes) {
   root.innerHTML = `<table class="node-table"><thead><tr><th>名称</th><th>ID</th><th>状态</th><th>操作</th></tr></thead><tbody>${nodes.map(node => `<tr>
     <td>${escapeHtml(node.name)}</td><td><code>${escapeHtml(node.id)}</code></td>
     <td><span class="inline-status ${node.online ? "online" : ""}">${node.online ? "在线" : "离线"}</span></td>
-    <td><button class="button danger small" type="button" data-revoke="${escapeHtml(node.id)}">停用</button></td>
+    <td><button class="button secondary small" type="button" data-rotate="${escapeHtml(node.id)}">重置密钥</button> <button class="button danger small" type="button" data-revoke="${escapeHtml(node.id)}">停用</button></td>
   </tr>`).join("")}</tbody></table>`;
 }
 
 function renderState(state) {
   currentState = state;
   renderNodes(state.nodes || []);
+  document.querySelector("#agent-upgrade-note").hidden = !(state.nodes || []).some(node => node.agent_version?.startsWith("0.1."));
   const latency = state.settings.latency;
   document.querySelector("#latency-telecom").value = latency.telecom;
   document.querySelector("#latency-unicom").value = latency.unicom;
@@ -144,11 +147,33 @@ document.querySelector("#node-form").addEventListener("submit", async event => {
 
 document.querySelector("#copy-install-command").addEventListener("click", async () => {
   const value = document.querySelector("#node-install-command").textContent;
-  try { await navigator.clipboard.writeText(value); toast("安装命令已复制"); }
-  catch { toast("复制失败，请手动选择密钥"); }
+  try {
+    if (!navigator.clipboard || !window.isSecureContext) throw new Error();
+    await navigator.clipboard.writeText(value);
+    toast("安装命令已复制");
+  } catch {
+    const range = document.createRange();
+    range.selectNodeContents(document.querySelector("#node-install-command"));
+    const selection = getSelection();
+    selection.removeAllRanges(); selection.addRange(range);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch { /* 保留选择供手动复制 */ }
+    toast(copied ? "安装命令已复制" : "命令已选中，请按 Ctrl+C 或长按复制");
+  }
 });
 
 document.querySelector("#node-list").addEventListener("click", async event => {
+  const rotate = event.target.closest("[data-rotate]");
+  if (rotate) {
+    if (!confirm(`重置节点 ${rotate.dataset.rotate} 的密钥？旧连接会断开，需要执行新安装命令。`)) return;
+    try {
+      const result = await api(`/nodes/${encodeURIComponent(rotate.dataset.rotate)}/token`, {method: "POST"});
+      document.querySelector("#node-install-command").textContent = agentInstallCommand(result.token);
+      document.querySelector("#token-box").classList.add("show");
+      await loadState(); toast("密钥已重置，请执行新安装命令");
+    } catch (error) { toast(error.message); }
+    return;
+  }
   const button = event.target.closest("[data-revoke]");
   if (!button) return;
   const id = button.dataset.revoke;

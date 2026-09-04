@@ -21,12 +21,22 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
       - name: Shell scripts
-        run: shellcheck deploy/*.sh
+        run: shellcheck deploy/*.sh tests/*.sh
       - name: Static checks
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Tests
         run: cargo test --all-features
+      - name: JavaScript syntax
+        run: |
+          node --check src/ui/app.js
+          node --check src/ui/admin.js
+          node --check src/ui/theme.js
+          node --test tests/ui.test.mjs
       - name: Release builds
         run: |
           cargo build --release --bin monitor-server --features server
           cargo build --release --bin monitor-agent --features agent
+      - name: Controller and agent integration
+        run: node tests/integration.mjs target/release/monitor-server target/release/monitor-agent
+      - name: Read-only service sandbox
+        run: sh tests/check-sandbox.sh

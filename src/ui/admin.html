@@ -6,6 +6,7 @@
     <meta name="color-scheme" content="light dark" />
     <meta name="description" content="Monitor 管理" />
     <link rel="icon" href="/favicon.svg" />
+    <script src="/assets/theme.js"></script>
     <link rel="stylesheet" href="/assets/app.css" />
     <title>管理 · Monitor</title>
   </head>
@@ -18,6 +19,7 @@
         </a>
         <div class="header-actions">
           <a class="admin-link" href="/">状态页</a>
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="切换主题"><svg class="moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg><svg class="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1 1M18 18l1 1M5 19l1-1M18 6l1-1"/></svg></button>
           <button class="button secondary small hidden" id="logout" type="button">退出</button>
         </div>
       </div>
@@ -38,7 +40,7 @@
 
     <main class="shell admin-shell hidden" id="admin-view">
       <div class="admin-top">
-        <div><h1>管理</h1><p>只保留节点、延迟地址与站点文字。</p></div>
+        <div><h1>管理</h1></div>
       </div>
       <nav class="tabs" aria-label="后台栏目">
         <button class="tab active" type="button" data-panel="nodes-panel">节点</button>
@@ -64,7 +66,7 @@
 
       <section class="panel" id="latency-panel">
         <form class="panel-card settings-form" id="latency-form">
-          <div class="panel-head"><div><h2>三网延迟地址</h2><p>保存后立即下发到在线探针，只允许 TCP host:port。</p></div></div>
+          <div class="panel-head"><div><h2>三网延迟地址</h2><p>每 30 秒检测一轮并记录。支持 host:port 和 [IPv6]:port；修改地址后显示新目标的历史。</p><p id="agent-upgrade-note" hidden>有节点使用旧版探针，需要手动更新后才会按 30 秒检测并记录。</p></div></div>
           <div class="field"><label for="latency-telecom">电信</label><input class="input" id="latency-telecom" placeholder="ha-ct-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>
           <div class="field"><label for="latency-unicom">联通</label><input class="input" id="latency-unicom" placeholder="ha-cu-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>
           <div class="field"><label for="latency-mobile">移动</label><input class="input" id="latency-mobile" placeholder="ha-cm-v4.ip.zstaticcdn.com:80" autocomplete="off" required /></div>

@@ -11,6 +11,69 @@ pub struct Latency {
     pub mobile: Option<f32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencySample {
+    pub id: u64,
+    pub revision: u64,
+    pub values: Latency,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkCounter {
+    pub name: String,
+    pub index: u32,
+    pub rx: u64,
+    pub tx: u64,
+}
+
+// A newly discovered/replaced interface establishes a baseline, not a traffic spike.
+pub fn network_delta(previous: &[NetworkCounter], current: &[NetworkCounter]) -> (u64, u64) {
+    current.iter().fold((0_u64, 0_u64), |(rx, tx), next| {
+        let Some(old) = previous
+            .iter()
+            .find(|old| old.name == next.name && old.index == next.index)
+        else {
+            return (rx, tx);
+        };
+        let delta = |before, after| {
+            if after >= before {
+                after - before
+            } else {
+                after
+            }
+        };
+        (
+            rx.saturating_add(delta(old.rx, next.rx)),
+            tx.saturating_add(delta(old.tx, next.tx)),
+        )
+    })
+}
+
+pub fn valid_target(target: &str) -> bool {
+    if target.is_empty() || target.len() > 255 || !target.is_ascii() {
+        return false;
+    }
+    let Some((host, port)) = target.rsplit_once(':') else {
+        return false;
+    };
+    if !port.parse::<u16>().is_ok_and(|port| port > 0) {
+        return false;
+    }
+    if host.starts_with('[') && host.ends_with(']') {
+        return host[1..host.len() - 1]
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok();
+    }
+    !host.is_empty()
+        && host.split('.').all(|part| {
+            !part.is_empty()
+                && part.len() <= 63
+                && !part.starts_with('-')
+                && !part.ends_with('-')
+                && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LatencyTargets {
     pub telecom: String,
@@ -51,13 +114,18 @@ impl Default for SiteSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppSettings {
     pub latency: LatencyTargets,
+    pub latency_revision: u64,
     pub site: SiteSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    LatencyTargets { targets: LatencyTargets },
+    LatencyTargets {
+        targets: LatencyTargets,
+        #[serde(default)]
+        revision: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -76,6 +144,12 @@ pub struct Metrics {
     pub processes: u32,
     pub uptime: u64,
     pub latency: Latency,
+    #[serde(default)]
+    pub latency_sample: Option<LatencySample>,
+    #[serde(default)]
+    pub latency_at: Option<i64>,
+    #[serde(default)]
+    pub network: Vec<NetworkCounter>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +201,8 @@ pub struct StoredNode {
     pub disk_total: u64,
     pub metrics: Option<Metrics>,
     pub last_sample_minute: i64,
+    pub connection_id: u64,
+    pub close_signal: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 #[cfg(feature = "server")]
@@ -159,10 +235,15 @@ pub struct NodeView {
 #[cfg(feature = "server")]
 impl StoredNode {
     pub fn as_view(&self, now: i64) -> NodeView {
+        let date = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
+        let month_matches = self.month_key == date.format("%Y-%m").to_string();
+        let day_matches = self.day_key == date.format("%Y-%m-%d").to_string();
         NodeView {
             id: self.id.clone(),
             name: self.name.clone(),
-            online: self.metrics.is_some() && now - self.last_seen <= OFFLINE_AFTER_SECS,
+            online: self.close_signal.is_some()
+                && self.metrics.is_some()
+                && (0..=OFFLINE_AFTER_SECS).contains(&(now - self.last_seen)),
             last_seen: self.last_seen,
             agent_version: self.agent_version.clone(),
             hostname: self.hostname.clone(),
@@ -177,10 +258,10 @@ impl StoredNode {
             disk_total: self.disk_total,
             total_rx: self.total_rx,
             total_tx: self.total_tx,
-            month_rx: self.month_rx,
-            month_tx: self.month_tx,
-            day_rx: self.day_rx,
-            day_tx: self.day_tx,
+            month_rx: if month_matches { self.month_rx } else { 0 },
+            month_tx: if month_matches { self.month_tx } else { 0 },
+            day_rx: if day_matches { self.day_rx } else { 0 },
+            day_tx: if day_matches { self.day_tx } else { 0 },
             metrics: self.metrics.clone(),
         }
     }
@@ -206,4 +287,70 @@ pub struct HealthResponse {
 pub struct PersistEvent {
     pub node: StoredNode,
     pub write_sample: bool,
+    pub latency: Option<LatencySample>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nic(name: &str, index: u32, rx: u64, tx: u64) -> NetworkCounter {
+        NetworkCounter {
+            name: name.into(),
+            index,
+            rx,
+            tx,
+        }
+    }
+
+    #[test]
+    fn network_baseline_reset_and_interface_replacement() {
+        let old = vec![nic("eth0", 2, 100, 200)];
+        assert_eq!(network_delta(&[], &old), (0, 0));
+        assert_eq!(network_delta(&old, &[nic("eth0", 2, 150, 260)]), (50, 60));
+        assert_eq!(network_delta(&old, &[nic("eth0", 2, 10, 20)]), (10, 20));
+        assert_eq!(network_delta(&old, &[nic("eth0", 3, 5000, 6000)]), (0, 0));
+        assert_eq!(network_delta(&old, &[]), (0, 0));
+        assert_eq!(
+            network_delta(
+                &old,
+                &[nic("eth0", 2, 101, 201), nic("eth1", 4, 99999, 99999)]
+            ),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn targets_require_a_host_and_port_and_support_ipv6() {
+        for value in ["example.com:80", "127.0.0.1:34331", "[2001:db8::1]:443"] {
+            assert!(valid_target(value), "{value}");
+        }
+        for value in [
+            "",
+            "http://example.com:80",
+            "::1:80",
+            "[]:80",
+            "[oops]:80",
+            "host:0",
+            "host:65536",
+            "a..b:80",
+            "x:80/path",
+            "x:80#bad",
+            "x\n:80",
+            "-x:80",
+        ] {
+            assert!(!valid_target(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn legacy_metrics_deserialize_without_new_fields() {
+        let mut json = serde_json::to_value(Metrics::default()).unwrap();
+        for key in ["network", "latency_sample", "latency_at"] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        let metrics: Metrics = serde_json::from_value(json).unwrap();
+        assert!(metrics.network.is_empty());
+        assert!(metrics.latency_sample.is_none());
+    }
 }

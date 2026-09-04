@@ -31,12 +31,13 @@ mod linux {
     use std::fs;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use anyhow::{bail, Context, Result};
     use futures_util::{SinkExt, StreamExt};
     use http::header::{AUTHORIZATION, USER_AGENT};
-    use tokio::net::TcpStream;
+    use tokio::net::{lookup_host, TcpStream};
+    use tokio::sync::watch;
     use tokio::time::{interval, sleep, timeout, MissedTickBehavior};
     use tokio_tungstenite::connect_async_with_config;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -46,7 +47,8 @@ mod linux {
 
     use super::AgentOptions;
     use crate::model::{
-        AgentReport, Latency, LatencyTargets, Metrics, ServerMessage, PROTOCOL_VERSION,
+        network_delta, valid_target, AgentReport, Latency, LatencySample, LatencyTargets, Metrics,
+        NetworkCounter, ServerMessage, PROTOCOL_VERSION,
     };
 
     const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -69,24 +71,45 @@ mod linux {
     #[derive(Debug, Default)]
     struct Collector {
         previous_cpu: Option<(u64, u64)>,
-        previous_network: Option<(u64, u64, Instant)>,
+        previous_network: Option<(Vec<NetworkCounter>, Instant)>,
     }
 
     pub async fn run(options: AgentOptions) -> Result<()> {
-        if options.interval < Duration::from_secs(1) {
-            bail!("上报间隔不能小于 1 秒");
+        if options.interval < Duration::from_secs(1) || options.interval > Duration::from_secs(10) {
+            bail!("上报间隔必须为 1–10 秒");
         }
-        let static_info = collect_static(&options.disk)?;
+        let mut static_info = collect_static(&options.disk)?;
         let endpoint = websocket_endpoint(&options.server);
         let mut backoff = 2_u64;
-
+        let mut collector = Collector::default();
+        let initial_targets = LatencyTargets {
+            telecom: options.telecom.clone(),
+            unicom: options.unicom.clone(),
+            mobile: options.mobile.clone(),
+        };
+        if !valid_targets(&initial_targets) {
+            bail!("延迟地址必须为 host:port 或 [IPv6]:port");
+        }
+        let (targets, target_updates) = watch::channel(Some((initial_targets, 0)));
+        let (sample_tx, samples) = watch::channel(None);
+        tokio::spawn(sample_latency(target_updates, sample_tx));
         loop {
-            match connect_and_report(&endpoint, &options, &static_info).await {
-                Ok(()) => {
-                    backoff = 2;
-                    warn!("控制端关闭了连接");
-                }
+            let started = Instant::now();
+            match connect_and_report(
+                &endpoint,
+                &options,
+                &mut static_info,
+                &mut collector,
+                &targets,
+                &samples,
+            )
+            .await
+            {
+                Ok(()) => warn!("控制端关闭了连接"),
                 Err(error) => warn!(%error, "上报连接中断"),
+            }
+            if started.elapsed() >= Duration::from_secs(30) {
+                backoff = 2;
             }
             sleep(Duration::from_secs(backoff)).await;
             backoff = (backoff * 2).min(30);
@@ -97,7 +120,10 @@ mod linux {
     async fn connect_and_report(
         endpoint: &str,
         options: &AgentOptions,
-        static_info: &StaticInfo,
+        static_info: &mut StaticInfo,
+        collector: &mut Collector,
+        targets: &watch::Sender<Option<(LatencyTargets, u64)>>,
+        samples: &watch::Receiver<Option<LatencySample>>,
     ) -> Result<()> {
         let mut request = endpoint.into_client_request().context("控制端地址无效")?;
         request.headers_mut().insert(
@@ -110,45 +136,54 @@ mod linux {
             USER_AGENT,
             format!("monitor-agent/{VERSION}").parse().unwrap(),
         );
-
         let mut config = WebSocketConfig::default();
         config.read_buffer_size = 4 * 1024;
         config.write_buffer_size = 4 * 1024;
         config.max_write_buffer_size = 64 * 1024;
         config.max_message_size = Some(64 * 1024);
         config.max_frame_size = Some(64 * 1024);
-
-        let (socket, _) = connect_async_with_config(request, Some(config), true)
-            .await
-            .context("无法连接控制端")?;
+        let (socket, _) = timeout(
+            Duration::from_secs(15),
+            connect_async_with_config(request, Some(config), true),
+        )
+        .await
+        .context("连接控制端超时")??;
         info!(endpoint, "已连接控制端");
         let (mut writer, mut reader) = socket.split();
         let mut ticker = interval(options.interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut collector = Collector::default();
-        let mut targets = LatencyTargets {
-            telecom: options.telecom.clone(),
-            unicom: options.unicom.clone(),
-            mobile: options.mobile.clone(),
-        };
-
+        let mut heartbeat = interval(Duration::from_secs(15));
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut heard_at = Instant::now();
+        let mut static_at = Instant::now();
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let report = collect_report(&mut collector, static_info, options, &targets).await?;
+                    if static_at.elapsed() >= Duration::from_secs(300) {
+                        *static_info = collect_static(&options.disk)?;
+                        static_at = Instant::now();
+                    }
+                    let sample = samples.borrow().clone();
+                    let report = collect_report(collector, static_info, options, sample)?;
                     let payload = serde_json::to_string(&report)?;
-                    writer.send(Message::Text(payload.into())).await?;
+                    timeout(Duration::from_secs(5), writer.send(Message::Text(payload.into()))).await??;
+                }
+                _ = heartbeat.tick() => {
+                    if heard_at.elapsed() > Duration::from_secs(45) { bail!("控制端心跳超时"); }
+                    timeout(Duration::from_secs(5), writer.send(Message::Ping(Vec::new().into()))).await??;
                 }
                 incoming = reader.next() => {
+                    heard_at = Instant::now();
                     match incoming {
                         Some(Ok(Message::Text(payload))) => {
-                            if let Ok(ServerMessage::LatencyTargets { targets: updated }) = serde_json::from_str(&payload) {
+                            if let Ok(ServerMessage::LatencyTargets { targets: updated, revision }) = serde_json::from_str(&payload) {
                                 if valid_targets(&updated) {
-                                    targets = updated;
+                                    let next = Some((updated, revision));
+                                    if *targets.borrow() != next { targets.send_replace(next); }
                                 }
                             }
                         }
-                        Some(Ok(Message::Ping(payload))) => writer.send(Message::Pong(payload)).await?,
+                        Some(Ok(Message::Ping(payload))) => { timeout(Duration::from_secs(5), writer.send(Message::Pong(payload))).await??; }
                         Some(Ok(Message::Close(_))) | None => return Ok(()),
                         Some(Err(error)) => return Err(error.into()),
                         _ => {}
@@ -158,38 +193,71 @@ mod linux {
         }
     }
 
-    async fn collect_report(
+    async fn sample_latency(
+        mut config: watch::Receiver<Option<(LatencyTargets, u64)>>,
+        samples: watch::Sender<Option<LatencySample>>,
+    ) {
+        let mut ticker = interval(Duration::from_secs(30));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {},
+                changed = config.changed() => {
+                    if changed.is_err() { return; }
+                    ticker.reset();
+                }
+            }
+            let Some((targets, revision)) = config.borrow_and_update().clone() else {
+                continue;
+            };
+            let values = tokio::select! {
+                values = measure_latency(&targets) => values,
+                changed = config.changed() => {
+                    if changed.is_err() { return; }
+                    ticker.reset_immediately();
+                    continue;
+                }
+            };
+            let id = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .min(i64::MAX as u128) as u64;
+            samples.send_replace(Some(LatencySample {
+                id,
+                revision,
+                values,
+            }));
+        }
+    }
+
+    fn collect_report(
         collector: &mut Collector,
         static_info: &StaticInfo,
         options: &AgentOptions,
-        targets: &LatencyTargets,
+        sample: Option<LatencySample>,
     ) -> Result<AgentReport> {
         let cpu_now = read_cpu()?;
-        let cpu = match collector.previous_cpu.replace(cpu_now) {
-            Some(previous) => cpu_percent(previous, cpu_now),
-            None => 0.0,
-        };
-        let (net_rx_total, net_tx_total) = read_network()?;
+        let cpu = collector
+            .previous_cpu
+            .replace(cpu_now)
+            .map(|previous| cpu_percent(previous, cpu_now))
+            .unwrap_or(0.0);
+        let network = read_network()?;
+        let (net_rx_total, net_tx_total) = network.iter().fold((0_u64, 0_u64), |(rx, tx), nic| {
+            (rx.saturating_add(nic.rx), tx.saturating_add(nic.tx))
+        });
         let now = Instant::now();
-        let (net_rx, net_tx) =
-            match collector
-                .previous_network
-                .replace((net_rx_total, net_tx_total, now))
-            {
-                Some((old_rx, old_tx, old_at)) => {
-                    let elapsed = now.duration_since(old_at).as_secs_f64().max(0.001);
-                    (
-                        (net_rx_total.saturating_sub(old_rx) as f64 / elapsed) as u64,
-                        (net_tx_total.saturating_sub(old_tx) as f64 / elapsed) as u64,
-                    )
-                }
-                None => (0, 0),
-            };
+        let (net_rx, net_tx) = match collector.previous_network.replace((network.clone(), now)) {
+            Some((old, old_at)) => {
+                let elapsed = now.duration_since(old_at).as_secs_f64().max(0.001);
+                let (rx, tx) = network_delta(&old, &network);
+                ((rx as f64 / elapsed) as u64, (tx as f64 / elapsed) as u64)
+            }
+            None => (0, 0),
+        };
         let memory = read_memory()?;
         let disk_used = disk_space(&options.disk)?.1;
-        let load = read_load();
-        let latency = measure_latency(targets).await;
-
         Ok(AgentReport {
             protocol: PROTOCOL_VERSION,
             agent_version: VERSION.to_owned(),
@@ -206,7 +274,7 @@ mod linux {
             disk_total: static_info.disk_total,
             metrics: Metrics {
                 cpu,
-                load,
+                load: read_load(),
                 mem_used: memory.mem_used,
                 swap_used: memory.swap_used,
                 disk_used,
@@ -214,11 +282,17 @@ mod linux {
                 net_tx,
                 net_rx_total,
                 net_tx_total,
+                network,
                 tcp: socket_count("/proc/net/tcp") + socket_count("/proc/net/tcp6"),
                 udp: socket_count("/proc/net/udp") + socket_count("/proc/net/udp6"),
                 processes: process_count(),
                 uptime: read_uptime(),
-                latency,
+                latency: sample
+                    .as_ref()
+                    .map(|sample| sample.values.clone())
+                    .unwrap_or_default(),
+                latency_sample: sample,
+                latency_at: None,
             },
         })
     }
@@ -314,7 +388,8 @@ mod linux {
         if values.len() < 4 {
             bail!("/proc/stat 格式无效");
         }
-        let total = values.iter().sum();
+        // guest/guest_nice are already included in user/nice.
+        let total = values.iter().take(8).sum();
         let idle = values[3] + values.get(4).copied().unwrap_or(0);
         Ok((total, idle))
     }
@@ -328,27 +403,62 @@ mod linux {
         ((total.saturating_sub(idle)) as f64 * 100.0 / total as f64).clamp(0.0, 100.0) as f32
     }
 
-    fn read_network() -> Result<(u64, u64)> {
-        parse_network(&fs::read_to_string("/proc/net/dev").context("无法读取网络统计")?)
+    fn read_network() -> Result<Vec<NetworkCounter>> {
+        let mut counters =
+            parse_network(&fs::read_to_string("/proc/net/dev").context("无法读取网络统计")?)?;
+        for nic in &mut counters {
+            nic.index = read_text(&format!("/sys/class/net/{}/ifindex", nic.name))
+                .trim()
+                .parse()
+                .unwrap_or(0);
+        }
+        Ok(counters)
     }
 
-    fn parse_network(text: &str) -> Result<(u64, u64)> {
-        let mut rx = 0_u64;
-        let mut tx = 0_u64;
+    fn parse_network(text: &str) -> Result<Vec<NetworkCounter>> {
+        let mut result = Vec::new();
         for line in text.lines().skip(2) {
             let Some((name, counters)) = line.split_once(':') else {
                 continue;
             };
-            if name.trim() == "lo" {
+            let name = name.trim();
+            if name == "lo"
+                || [
+                    "br",
+                    "cni",
+                    "docker",
+                    "podman",
+                    "flannel",
+                    "veth",
+                    "virbr",
+                    "vmbr",
+                    "tap",
+                    "tun",
+                    "wg",
+                    "tailscale",
+                    "fwbr",
+                    "fwpr",
+                ]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+            {
                 continue;
             }
             let fields: Vec<&str> = counters.split_whitespace().collect();
-            if fields.len() >= 9 {
-                rx = rx.saturating_add(fields[0].parse().unwrap_or(0));
-                tx = tx.saturating_add(fields[8].parse().unwrap_or(0));
+            if fields.len() < 9 {
+                bail!("网络统计格式无效");
             }
+            result.push(NetworkCounter {
+                name: name.to_owned(),
+                index: 0,
+                rx: fields[0].parse()?,
+                tx: fields[8].parse()?,
+            });
         }
-        Ok((rx, tx))
+        if result.len() > 64 {
+            bail!("网卡数量超出 64 个的限制");
+        }
+        Ok(result)
     }
 
     fn read_load() -> [f32; 3] {
@@ -451,7 +561,12 @@ mod linux {
         if Path::new("/proc/xen").exists() {
             return "xen".to_owned();
         }
-        "physical".to_owned()
+        if read_text("/proc/cpuinfo").contains("hypervisor") {
+            "virtualized"
+        } else {
+            "unknown"
+        }
+        .to_owned()
     }
 
     async fn measure_latency(targets: &LatencyTargets) -> Latency {
@@ -468,8 +583,14 @@ mod linux {
     }
 
     async fn tcp_latency(address: &str) -> Option<f32> {
+        // Resolve separately so the displayed TCP latency does not include DNS time.
+        let destination = timeout(Duration::from_secs(3), lookup_host(address))
+            .await
+            .ok()?
+            .ok()?
+            .next()?;
         let started = Instant::now();
-        match timeout(Duration::from_millis(800), TcpStream::connect(address)).await {
+        match timeout(Duration::from_secs(3), TcpStream::connect(destination)).await {
             Ok(Ok(_)) => Some(started.elapsed().as_secs_f32() * 1000.0),
             _ => None,
         }
@@ -478,16 +599,7 @@ mod linux {
     fn valid_targets(targets: &LatencyTargets) -> bool {
         [&targets.telecom, &targets.unicom, &targets.mobile]
             .into_iter()
-            .all(|target| {
-                !target.is_empty()
-                    && target.len() <= 255
-                    && !target
-                        .chars()
-                        .any(|character| character.is_whitespace() || "/?#".contains(character))
-                    && target.rsplit_once(':').is_some_and(|(host, port)| {
-                        !host.is_empty() && port.parse::<u16>().is_ok_and(|value| value > 0)
-                    })
-            })
+            .all(|target| valid_target(target))
     }
 
     fn read_text(path: &str) -> String {
@@ -501,7 +613,16 @@ mod linux {
         #[test]
         fn parses_network_and_ignores_loopback() {
             let fixture = "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n    lo: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0\n  eth0: 300 0 0 0 0 0 0 0 400 0 0 0 0 0 0 0\n";
-            assert_eq!(parse_network(fixture).unwrap(), (300, 400));
+            let counters = parse_network(fixture).unwrap();
+            assert_eq!(
+                counters,
+                vec![NetworkCounter {
+                    name: "eth0".into(),
+                    index: 0,
+                    rx: 300,
+                    tx: 400
+                }]
+            );
         }
 
         #[test]

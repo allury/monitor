@@ -32,6 +32,8 @@ jobs:
           node --check src/ui/admin.js
           node --check src/ui/theme.js
           node --test tests/ui.test.mjs
+      - name: Read-only service sandbox
+        run: sh tests/check-sandbox.sh
       - name: Release builds
         run: |
           cargo build --release --bin monitor-server --features server
@@ -40,5 +42,3 @@ jobs:
         env:
           MONITOR_TEST_SANDBOX: '1'
         run: node tests/integration.mjs target/release/monitor-server target/release/monitor-agent
-      - name: Read-only service sandbox
-        run: sh tests/check-sandbox.sh

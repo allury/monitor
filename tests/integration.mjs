@@ -25,7 +25,7 @@ async function port() {
 }
 const serverPort = await port();
 const base = 'http://127.0.0.1:' + serverPort;
-let session = '', server, agent, probes, serverOutput = '';
+let session = '', server, agent, probes, serverOutput = '', agentOutput = '', nodeToken = '';
 const sandbox = process.env.MONITOR_TEST_SANDBOX === '1';
 const sandboxUnit = 'monitor-integration-' + randomBytes(8).toString('hex');
 const sandboxBinary = '/run/' + sandboxUnit;
@@ -51,8 +51,9 @@ async function startAgent(token, target) {
   sandboxStarted = true;
   return spawn('sudo', ['systemd-run','--quiet','--wait','--pipe','--collect','--unit=' + sandboxUnit,
     ...properties.map(value => '--property=' + value), '--property=RuntimeMaxSec=100',
-    '--property=LoadCredential=token:' + credential, '--property=Environment=MONITOR_TOKEN_FILE=%d/token',
-    sandboxBinary, ...arguments_], {stdio:'ignore'});
+    '--property=LoadCredential=token:' + credential,
+    '/bin/sh', '-c', 'export MONITOR_TOKEN_FILE="$CREDENTIALS_DIRECTORY/token"; exec "$@"',
+    'monitor-sandbox', sandboxBinary, ...arguments_], {stdio:['ignore','pipe','pipe']});
 }
 async function api(path, body, method = body ? 'POST' : 'GET') {
   const response = await fetch(base + path, {method, headers: {'content-type':'application/json', authorization:'Bearer ' + session}, body: body ? JSON.stringify(body) : undefined});
@@ -114,7 +115,10 @@ try {
   await new Promise(r => probes.listen(0, '127.0.0.1', r));
   const target = '127.0.0.1:' + probes.address().port;
   assert.equal((await api('/api/admin/latency', {telecom:target,unicom:target,mobile:target}, 'PUT')).status, 200);
-  agent = await startAgent(created.value.token, target);
+  nodeToken = created.value.token;
+  agent = await startAgent(nodeToken, target);
+  agent.stdout?.on('data', data => agentOutput = (agentOutput + data.toString()).slice(-8000));
+  agent.stderr?.on('data', data => agentOutput = (agentOutput + data.toString()).slice(-8000));
   await until(async () => (await nodes())[0]?.online, 'Agent did not become online');
   const firstSeen = (await nodes())[0].last_seen;
   await wait(63500);
@@ -153,6 +157,9 @@ try {
   server.kill('SIGTERM');
   assert.equal(await Promise.race([exited, wait(10000).then(() => 'timeout')]), 0, 'Controller did not drain and stop cleanly');
   console.log('PASS: status cadence, 30-second probes, history, deep links, credential rotation, connection takeover, revocation, graceful shutdown' + (sandbox ? ', hardened systemd agent' : ''));
+} catch (error) {
+  if (agentOutput) console.error(agentOutput.replaceAll(nodeToken, '[redacted]'));
+  throw error;
 } finally {
   stopAgent(); server?.kill('SIGTERM');
   for (const socket of sockets) socket.destroy();

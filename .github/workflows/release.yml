@@ -3,13 +3,35 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths: [.github/release-version]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate release version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag=$(cat .github/release-version)
+          fi
+          printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml)
+          test "$tag" = "v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   verify:
+    needs: version
     uses: ./.github/workflows/ci.yml
 
   build:
@@ -56,8 +78,8 @@ jobs:
             ${{ matrix.artifact }}.sha256
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+    needs: [version, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -70,12 +92,20 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to replace it." >&2
+            exit 1
+          fi
+          if existing_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha 2>/dev/null); then
+            test "$existing_commit" = "$GITHUB_SHA"
+          fi
+          gh release create "$RELEASE_TAG" \
             artifacts/* \
             deploy/install-server.sh \
             deploy/install-agent.sh \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Monitor $GITHUB_REF_NAME" \
-            --notes-file README.md \
-            --verify-tag
+            --target "$GITHUB_SHA" \
+            --title "Monitor $RELEASE_TAG" \
+            --notes-file README.md
